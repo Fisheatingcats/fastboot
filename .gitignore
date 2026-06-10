@@ -1,0 +1,27 @@
+# Build outputs
+build/
+build*/
+
+# Compiled objects
+*.o
+*.d
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.cache/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

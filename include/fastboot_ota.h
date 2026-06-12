@@ -1,7 +1,9 @@
 #ifndef FASTBOOT_OTA_H
 #define FASTBOOT_OTA_H
 
-#include "fastboot_iflash.h"
+#include "fastboot_iflash_ops.h"
+#include "fastboot_log.h"
+#include "fastboot_status.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,9 +29,10 @@ typedef struct {
 } fastboot_ota_header_t;
 #pragma pack(pop)
 
-fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
-                                           void *ctx);
-uint32_t fastboot_crc32(const uint8_t *data, size_t len,
-                              uint32_t seed);
+fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn, void *ctx,
+                                    const fastboot_iflash_ops_t *iflash,
+                                    const fboot_log_t *log);
+
+uint32_t fastboot_crc32(const uint8_t *data, size_t len, uint32_t seed);
 
 #endif /* FASTBOOT_OTA_H */

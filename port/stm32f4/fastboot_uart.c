@@ -292,3 +292,26 @@ const fboot_io_t *fastboot_uart_io(void)
 
     return &io;
 }
+
+static void uart_log_puts(void *ctx, const char *s)
+{
+    (void)ctx;
+    fastboot_uart_puts(s);
+}
+
+static void uart_log_dec32(void *ctx, const char *label, uint32_t value)
+{
+    (void)ctx;
+    fastboot_uart_dec32(label, value);
+}
+
+const fboot_log_t *fastboot_uart_log(void)
+{
+    static const fboot_log_t log = {
+        uart_log_puts,
+        uart_log_dec32,
+        NULL,
+    };
+
+    return &log;
+}

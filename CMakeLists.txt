@@ -1,28 +1,51 @@
 cmake_minimum_required(VERSION 3.22)
 
+project(fastboot C)
+
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # FastBoot library
 # Usage:
+#   set(FASTBOOT_PORT "stm32f4" CACHE STRING "" FORCE)
+#   set(FASTBOOT_CONFIG_DIR ".../config" CACHE PATH "" FORCE)
+#   set(FASTBOOT_PLATFORM_INCLUDES ".../hal;.../cmsis" CACHE STRING "" FORCE)
 #   add_subdirectory(FastBoot)
 #   target_link_libraries(your_target PRIVATE fastboot)
 
-project(fastboot C)
-
-# ── Library sources ──────────────────────────────────────────────────────────
-
 set(FASTBOOT_CORE_SOURCES
     src/core/fastboot_ymodem.c
-    src/core/fastboot_ota.c
-    src/core/fastboot_staging.c
 )
+
+option(FASTBOOT_ENABLE_OTA
+    "Build FWOT install and staging helpers. Requires a platform port."
+    ON)
+option(FASTBOOT_BUILD_TESTS
+    "Build host-side FastBoot unit tests."
+    OFF)
 
 set(FASTBOOT_QUEUE_SOURCES
     src/queue/fastboot_queue.c
 )
 
-# Port sources are NOT added by default.
-# The user must provide port sources or use a preset:
 if(NOT DEFINED FASTBOOT_PORT)
     set(FASTBOOT_PORT "none" CACHE STRING "FastBoot port: stm32f4, none")
+endif()
+set_property(CACHE FASTBOOT_PORT PROPERTY STRINGS none stm32f4)
+
+if(FASTBOOT_PORT STREQUAL "none" AND FASTBOOT_ENABLE_OTA)
+    message(STATUS "FASTBOOT_PORT=none: disabling FASTBOOT_ENABLE_OTA")
+    set(FASTBOOT_ENABLE_OTA OFF CACHE BOOL
+        "Build FWOT install and staging helpers. Requires a platform port."
+        FORCE)
+endif()
+
+if(FASTBOOT_ENABLE_OTA OR FASTBOOT_BUILD_TESTS)
+    list(APPEND FASTBOOT_CORE_SOURCES
+        src/core/fastboot_ota.c
+        src/core/fastboot_staging.c
+    )
 endif()
 
 set(FASTBOOT_PORT_SOURCES "")
@@ -34,9 +57,9 @@ if(FASTBOOT_PORT STREQUAL "stm32f4")
         port/stm32f4/fastboot_w25q64.c
         port/stm32f4/hal_msp_boot.c
     )
+elseif(NOT FASTBOOT_PORT STREQUAL "none")
+    message(FATAL_ERROR "Unsupported FASTBOOT_PORT: ${FASTBOOT_PORT}")
 endif()
-
-# ── Library target ───────────────────────────────────────────────────────────
 
 add_library(fastboot STATIC
     ${FASTBOOT_CORE_SOURCES}
@@ -44,9 +67,26 @@ add_library(fastboot STATIC
     ${FASTBOOT_PORT_SOURCES}
 )
 
+target_compile_features(fastboot PUBLIC c_std_99)
+
 target_include_directories(fastboot PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# A host-only configuration lets the protocol/queue code build and test
+# without pulling in STM32 HAL or board headers. Embedded applications should
+# provide FASTBOOT_CONFIG_DIR instead.
+if(FASTBOOT_PORT STREQUAL "none" AND NOT DEFINED FASTBOOT_CONFIG_DIR)
+    target_compile_definitions(fastboot PUBLIC
+        FASTBOOT_EXTFLASH_OTA_SIZE=0x400000u
+        FASTBOOT_EXTFLASH_OTA_OFFSET=0x000000u
+        FASTBOOT_APP_FLASH_BASE=0x08008000u
+        FASTBOOT_APP_FLASH_SIZE=0x00078000u
+        FASTBOOT_APP_FLASH_END=0x08080000u
+        FASTBOOT_SRAM_BASE=0x20000000u
+        FASTBOOT_SRAM_END=0x20020000u
+    )
+endif()
 
 if(FASTBOOT_PORT STREQUAL "stm32f4")
     target_include_directories(fastboot PRIVATE
@@ -58,8 +98,35 @@ if(FASTBOOT_PORT STREQUAL "stm32f4")
     )
 endif()
 
-# User must provide fastboot_config.h with memory layout constants.
-# Add the directory containing it to the include path:
 if(DEFINED FASTBOOT_CONFIG_DIR)
     target_include_directories(fastboot PUBLIC ${FASTBOOT_CONFIG_DIR})
+endif()
+
+if(DEFINED FASTBOOT_PLATFORM_INCLUDES)
+    target_include_directories(fastboot PRIVATE ${FASTBOOT_PLATFORM_INCLUDES})
+endif()
+
+if(FASTBOOT_BUILD_TESTS)
+    include(CTest)
+    if(BUILD_TESTING)
+        add_executable(fastboot_test_queue tests/test_queue.c)
+        target_link_libraries(fastboot_test_queue PRIVATE fastboot)
+        add_test(NAME fastboot_queue COMMAND fastboot_test_queue)
+
+        add_executable(fastboot_test_ymodem tests/test_ymodem.c)
+        target_link_libraries(fastboot_test_ymodem PRIVATE fastboot)
+        add_test(NAME fastboot_ymodem COMMAND fastboot_test_ymodem)
+
+        add_executable(fastboot_test_crc tests/test_crc.c)
+        target_link_libraries(fastboot_test_crc PRIVATE fastboot)
+        add_test(NAME fastboot_crc COMMAND fastboot_test_crc)
+
+        add_executable(fastboot_test_ota tests/test_ota.c)
+        target_link_libraries(fastboot_test_ota PRIVATE fastboot)
+        add_test(NAME fastboot_ota COMMAND fastboot_test_ota)
+
+        add_executable(fastboot_test_staging tests/test_staging.c)
+        target_link_libraries(fastboot_test_staging PRIVATE fastboot)
+        add_test(NAME fastboot_staging COMMAND fastboot_test_staging)
+    endif()
 endif()

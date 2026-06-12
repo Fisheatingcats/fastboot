@@ -13,6 +13,16 @@
  * Each platform must implement these functions to run FastBoot.
  */
 
+#ifndef FASTBOOT_NORETURN
+#if defined(__GNUC__) || defined(__clang__)
+#define FASTBOOT_NORETURN __attribute__((noreturn))
+#elif defined(_MSC_VER)
+#define FASTBOOT_NORETURN __declspec(noreturn)
+#else
+#define FASTBOOT_NORETURN
+#endif
+#endif
+
 /* ── Tick / Delay ────────────────────────────────────────────────────────── */
 
 /** Return monotonic millisecond tick (wraps at 2^32). */
@@ -29,7 +39,7 @@ void fastboot_port_feed_watchdog(void);
 /* ── System ──────────────────────────────────────────────────────────────── */
 
 /** Trigger a full system reset. Never returns. */
-void fastboot_port_reset(void) __attribute__((noreturn));
+FASTBOOT_NORETURN void fastboot_port_reset(void);
 
 /* ── GPIO (optional – used by bootloader main, not by library core) ──────── */
 

@@ -2,6 +2,8 @@
 #define FASTBOOT_W25Q64_H
 
 #include "fastboot_sink.h"
+#include "fastboot_staging.h"
+#include "fastboot_staging_store.h"
 #include "fastboot_status.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -16,5 +18,7 @@ fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset);
 fboot_status_t fastboot_w25q64_erase_range(uint32_t offset,
                                                   size_t len);
 const fboot_sink_t *fastboot_w25q64_ota_sink(void);
+const fastboot_staging_source_t *fastboot_w25q64_staging_source(void);
+const fastboot_staging_store_t *fastboot_w25q64_staging_store(void);
 
 #endif /* FASTBOOT_W25Q64_H */

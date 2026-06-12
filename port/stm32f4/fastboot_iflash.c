@@ -149,3 +149,55 @@ fboot_status_t fastboot_iflash_verify(uint32_t addr,
     }
     return FB_OK;
 }
+
+fboot_status_t fastboot_iflash_read(uint32_t addr, uint8_t *data, size_t len)
+{
+    if (!data && len > 0u) {
+        return FB_ERR_PARAM;
+    }
+    if (!range_inside_app(addr, len)) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(data, (const void *)(uintptr_t)addr, len);
+    return FB_OK;
+}
+
+static fboot_status_t iflash_erase_app(void *ctx)
+{
+    (void)ctx;
+    return fastboot_iflash_erase_app();
+}
+
+static fboot_status_t iflash_write(void *ctx, uint32_t addr,
+                                   const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    return fastboot_iflash_write(addr, data, len);
+}
+
+static fboot_status_t iflash_verify(void *ctx, uint32_t addr,
+                                    const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    return fastboot_iflash_verify(addr, data, len);
+}
+
+static fboot_status_t iflash_read(void *ctx, uint32_t addr, uint8_t *data,
+                                  size_t len)
+{
+    (void)ctx;
+    return fastboot_iflash_read(addr, data, len);
+}
+
+const fastboot_iflash_ops_t *fastboot_iflash_ops(void)
+{
+    static const fastboot_iflash_ops_t ops = {
+        iflash_erase_app,
+        iflash_write,
+        iflash_verify,
+        iflash_read,
+        NULL,
+    };
+
+    return &ops;
+}

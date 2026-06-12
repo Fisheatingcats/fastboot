@@ -18,9 +18,11 @@ __pycache__/
 
 # IDE
 .cache/
+.vs/
 .vscode/
 *.swp
 *~
+Testing/
 
 # OS
 .DS_Store

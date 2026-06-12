@@ -99,7 +99,7 @@ OTA 包解析和安装模块。
 读取 OTA Header
     │
     ▼
-验证 Magic (0x4F544131)
+验证 Magic (0x544F5746)
     │
     ▼
 验证 Header CRC32
@@ -127,8 +127,15 @@ Readback 验证
 
 **关键函数:**
 ```c
-fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn, void *ctx);
+fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn, void *ctx,
+                                    const fastboot_iflash_ops_t *iflash,
+                                    const fboot_log_t *log);
 ```
+
+**OTA 安装流程:**
+- 流式 CRC32 验证: 每次从包源读取数据时累积 CRC，写入完成后与 header 中的 image_crc32 比较
+- 内部 Flash Readback CRC: 写入完成后，从内部 Flash 重新读取全部数据并计算 CRC，与 image_crc32 比较
+- 双重验证确保数据既正确传输又正确写入
 
 #### fastboot_staging.c
 
@@ -148,7 +155,7 @@ Staging 区管理模块。
 读取暂存区头部 (4B)
     │
     ▼
-验证 Magic (0x4F544131)
+验证 Magic (0x544F5746)
     │
     ▼
 调用 fastboot_ota_install()
@@ -163,7 +170,25 @@ Staging 区管理模块。
 
 **关键函数:**
 ```c
-fboot_status_t fastboot_staging_install_if_pending(void);
+fboot_status_t fastboot_staging_install_if_pending(
+    const fastboot_staging_store_t *store,
+    const fastboot_iflash_ops_t *iflash,
+    const fboot_log_t *log);
+```
+
+**参数说明:**
+- `store`: Staging 存储抽象，包含 `sink` (YMODEM 写入目标), `read()` (OTA 读取), `clear()` (安装后清除)
+- `iflash`: 内部 Flash 操作接口
+- `log`: 日志接口，可传 `NULL` 禁用日志
+
+**STM32F4 平台用法:**
+```c
+#include "fastboot_iflash.h"
+#include "fastboot_w25q64.h"
+
+const fastboot_staging_store_t *staging = fastboot_w25q64_staging_store();
+fboot_status_t rc = fastboot_staging_install_if_pending(
+    staging, fastboot_iflash_ops(), NULL);
 ```
 
 #### fastboot_ymodem.c
@@ -499,7 +524,8 @@ uint32_t fastboot_w25q64_jedec_id(void);
 fboot_status_t fastboot_w25q64_read(uint32_t offset, uint8_t *data, size_t len);
 fboot_status_t fastboot_w25q64_write(uint32_t offset, const uint8_t *data, size_t len);
 fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset);
-const fboot_sink_t *fastboot_w25q64_ota_sink(void);
+const fastboot_staging_store_t *fastboot_w25q64_staging_store(void); /* preferred */
+const fboot_sink_t *fastboot_w25q64_ota_sink(void); /* legacy: use fastboot_w25q64_staging_store() */
 ```
 
 ## 移植指南
@@ -578,10 +604,22 @@ void fastboot_port_led_toggle(void) {
 set(FASTBOOT_PORT "stm32f4" CACHE STRING "" FORCE)
 set(FASTBOOT_CONFIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/00_Config" CACHE PATH "" FORCE)
 set(FASTBOOT_PLATFORM_INCLUDES ... CACHE PATH "" FORCE)
+set(FASTBOOT_ENABLE_OTA ON CACHE BOOL "" FORCE)
 add_subdirectory(fastboot)
 
 target_link_libraries(your_target PRIVATE fastboot)
 ```
+
+### Host-side tests
+
+```bash
+cmake -S . -B build-host -DFASTBOOT_BUILD_TESTS=ON
+cmake --build build-host
+ctest --test-dir build-host -C Debug --output-on-failure
+```
+
+When `FASTBOOT_PORT=none`, FWOT install/staging sources are disabled and the
+host build covers the hardware-independent YMODEM and queue code.
 
 ## API 参考
 
@@ -590,10 +628,33 @@ target_link_libraries(your_target PRIVATE fastboot)
 #### fastboot_staging_install_if_pending()
 
 ```c
-fboot_status_t fastboot_staging_install_if_pending(void);
+fboot_status_t fastboot_staging_install_if_pending(
+    const fastboot_staging_store_t *store,
+    const fastboot_iflash_ops_t *iflash,
+    const fboot_log_t *log);
 ```
 
-检查 W25Q64 OTA 暂存区，如果有新固件则安装到内部 Flash。
+检查暂存区，如果有新固件则安装到内部 Flash。安装使用流式 CRC 和内部 Flash Readback CRC 双重验证。
+
+**参数:**
+- `store`: Staging 存储抽象 (如 `fastboot_w25q64_staging_store()`)，提供 `read()`, `clear()`, `sink`
+- `iflash`: 内部 Flash 操作接口 (如 `fastboot_iflash_ops()`)
+- `log`: 日志接口 (可传 `NULL`)
+
+**STM32F4 平台用法:**
+```c
+#include "fastboot_iflash.h"
+#include "fastboot_w25q64.h"
+
+const fastboot_staging_store_t *staging = fastboot_w25q64_staging_store();
+
+/* YMODEM 接收 */
+fastboot_ymodem_receive(fastboot_uart_io(), staging->sink, &received_size);
+
+/* OTA 安装 */
+fboot_status_t rc = fastboot_staging_install_if_pending(
+    staging, fastboot_iflash_ops(), NULL);
+```
 
 **返回值:**
 - `FB_OK`: 安装成功

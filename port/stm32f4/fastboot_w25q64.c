@@ -650,3 +650,54 @@ const fboot_sink_t *fastboot_w25q64_ota_sink(void)
 
     return &sink;
 }
+
+static fboot_status_t staging_read(void *ctx, uint32_t offset, uint8_t *data,
+                                   size_t len)
+{
+    (void)ctx;
+    fboot_status_t rc = fastboot_w25q64_init();
+
+    if (rc != FB_OK) {
+        return rc;
+    }
+    return fastboot_w25q64_read(FASTBOOT_EXTFLASH_OTA_OFFSET + offset, data,
+                                len);
+}
+
+static fboot_status_t staging_erase_sector(void *ctx, uint32_t offset)
+{
+    (void)ctx;
+    return fastboot_w25q64_erase_sector(FASTBOOT_EXTFLASH_OTA_OFFSET + offset);
+}
+
+const fastboot_staging_source_t *fastboot_w25q64_staging_source(void)
+{
+    static const fastboot_staging_source_t source = {
+        staging_read,
+        staging_erase_sector,
+        NULL,
+    };
+
+    return &source;
+}
+
+static fboot_status_t staging_clear(void *ctx)
+{
+    (void)ctx;
+    return fastboot_w25q64_erase_sector(FASTBOOT_EXTFLASH_OTA_OFFSET);
+}
+
+const fastboot_staging_store_t *fastboot_w25q64_staging_store(void)
+{
+    static fastboot_staging_store_t store;
+    static bool store_init;
+
+    if (!store_init) {
+        store.sink = fastboot_w25q64_ota_sink();
+        store.read = staging_read;
+        store.clear = staging_clear;
+        store.ctx = NULL;
+        store_init = true;
+    }
+    return &store;
+}

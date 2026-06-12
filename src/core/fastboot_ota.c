@@ -1,7 +1,5 @@
 #include "fastboot_ota.h"
-#include "fastboot_uart.h"
-#include "fastboot_watchdog.h"
-#include "fastboot_memory_map.h"
+#include "fastboot_config.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -68,8 +66,9 @@ static fboot_status_t validate_header(const fastboot_ota_header_t *header)
     return FB_OK;
 }
 
-fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
-                                           void *ctx)
+fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn, void *ctx,
+                                    const fastboot_iflash_ops_t *iflash,
+                                    const fboot_log_t *log)
 {
     fastboot_ota_header_t header;
     uint32_t image_crc = 0u;
@@ -78,7 +77,8 @@ fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
     uint32_t next_progress = OTA_PROGRESS_STEP;
     fboot_status_t rc;
 
-    if (!read_fn) {
+    if (!read_fn || !iflash || !iflash->erase_app || !iflash->write ||
+        !iflash->verify || !iflash->read) {
         return FB_ERR_PARAM;
     }
     if (read_fn(0u, (uint8_t *)&header, sizeof(header), ctx) != 0) {
@@ -93,13 +93,13 @@ fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
         return FB_ERR_FORMAT;
     }
 
-    fastboot_uart_dec32("install image bytes", header.image_size);
-    fastboot_uart_puts("[FB] erase app flash");
-    rc = fastboot_iflash_erase_app();
+    fboot_log_dec32(log, "install image bytes", header.image_size);
+    fboot_log_puts(log, "[FB] erase app flash");
+    rc = iflash->erase_app(iflash->ctx);
     if (rc != FB_OK) {
         return rc;
     }
-    fastboot_uart_puts("[FB] write app flash");
+    fboot_log_puts(log, "[FB] write app flash");
 
     remaining = header.image_size;
     while (remaining > 0u) {
@@ -112,20 +112,19 @@ fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
         }
 
         image_crc = fastboot_crc32(s_chunk, chunk, image_crc);
-        rc = fastboot_iflash_write(dst, s_chunk, chunk);
+        rc = iflash->write(iflash->ctx, dst, s_chunk, chunk);
         if (rc != FB_OK) {
             return rc;
         }
-        rc = fastboot_iflash_verify(dst, s_chunk, chunk);
+        rc = iflash->verify(iflash->ctx, dst, s_chunk, chunk);
         if (rc != FB_OK) {
             return rc;
         }
 
         image_pos += (uint32_t)chunk;
         remaining -= (uint32_t)chunk;
-        boot_feed_watchdog();
         if (image_pos >= next_progress || remaining == 0u) {
-            fastboot_uart_dec32("install written", image_pos);
+            fboot_log_dec32(log, "install written", image_pos);
             while (next_progress <= image_pos) {
                 next_progress += OTA_PROGRESS_STEP;
             }
@@ -135,32 +134,34 @@ fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn,
     if (image_crc != header.image_crc32) {
         return FB_ERR_CRC;
     }
-    fastboot_uart_puts("[FB] stream crc ok");
+    fboot_log_puts(log, "[FB] stream crc ok");
 
-    /* Second pass: read back from Flash and verify CRC independently.
-     * This catches Flash write hardware faults that per-chunk memcmp might miss. */
     {
         uint32_t readback_crc = 0u;
         uint32_t rb_pos = 0u;
         uint32_t rb_remaining = header.image_size;
 
-        fastboot_uart_puts("[FB] readback verify");
+        fboot_log_puts(log, "[FB] readback verify");
         while (rb_remaining > 0u) {
             size_t rb_chunk = rb_remaining > OTA_CHUNK_SIZE
                                   ? OTA_CHUNK_SIZE
                                   : (size_t)rb_remaining;
-            const uint8_t *flash_ptr =
-                (const uint8_t *)(uintptr_t)(FASTBOOT_APP_FLASH_BASE + rb_pos);
-            readback_crc = fastboot_crc32(flash_ptr, rb_chunk, readback_crc);
+            uint32_t rb_addr = FASTBOOT_APP_FLASH_BASE + rb_pos;
+
+            if (iflash->read(iflash->ctx, rb_addr, s_chunk, rb_chunk) !=
+                FB_OK) {
+                return FB_ERR_IO;
+            }
+            readback_crc = fastboot_crc32(s_chunk, rb_chunk, readback_crc);
             rb_pos += (uint32_t)rb_chunk;
             rb_remaining -= (uint32_t)rb_chunk;
         }
         if (readback_crc != header.image_crc32) {
-            fastboot_uart_puts("[FB] readback CRC MISMATCH");
+            fboot_log_puts(log, "[FB] readback CRC MISMATCH");
             return FB_ERR_VERIFY;
         }
     }
 
-    fastboot_uart_puts("[FB] install verified ok");
+    fboot_log_puts(log, "[FB] install verified ok");
     return FB_OK;
 }

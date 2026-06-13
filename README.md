@@ -1,337 +1,114 @@
 # FastBoot 库
 
-轻量级 OTA Bootloader 库，适用于 STM32 等嵌入式平台。
+## 概述
 
-## 目录
+FastBoot 是一个可移植的 OTA Bootloader 库，适用于 STM32 等嵌入式平台。采用分层架构设计，通过接口抽象实现硬件解耦，核心代码完全平台无关。
 
-- [库概述](#库概述)
-- [架构设计](#架构设计)
-- [模块详解](#模块详解)
-- [移植指南](#移植指南)
-- [API 参考](#api-参考)
-- [内部实现](#内部实现)
+主要特性：
+- YMODEM-1K 固件接收（CRC-16 校验、错误重传）
+- FWOT 格式 OTA 包解析与安装（流式 CRC32 + Readback 双重验证）
+- 外部 Flash 暂存区管理（Staging）
+- 异步写入队列（接收与 Flash 编程并行）
+- 可裁剪的编译配置（`FASTBOOT_CFG_*` 宏控制功能开关）
 
-## 库概述
-
-FastBoot 是一个可移植的 OTA Bootloader 库，采用分层架构设计：
-
-- **核心层 (Core)**: 硬件无关的协议和逻辑
-- **队列层 (Queue)**: 异步写入队列
-- **端口层 (Port)**: 平台相关的硬件驱动
-
-### 设计原则
-
-1. **硬件抽象**: 通过 Port 接口隔离硬件依赖
-2. **异步处理**: 队列机制实现接收与写入并行
-3. **接口驱动**: 使用函数指针实现多态
-4. **最小依赖**: 核心层仅依赖标准 C 库
-
-## 架构设计
+## 架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    应用层 (Application)                       │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  fastboot_main.c                                      │  │
-│  │  - 调用 FastBoot API                                  │  │
-│  │  - 实现具体业务逻辑                                    │  │
-│  └───────────────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    FastBoot 库                               │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                    公共 API 层                         │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  fastboot.h (聚合头文件)                        │  │  │
-│  │  │  fastboot_staging.h (OTA 安装)                  │  │  │
-│  │  │  fastboot_ymodem.h (YMODEM 接收)                │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                    核心层 (Core)                       │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  fastboot_ota.c      # OTA 包解析和安装         │  │  │
-│  │  │  fastboot_staging.c  # Staging 区管理           │  │  │
-│  │  │  fastboot_ymodem.c   # YMODEM-1K 协议          │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                    队列层 (Queue)                      │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  fastboot_queue.c    # 异步写入队列             │  │  │
-│  │  │  - 环形缓冲区                                   │  │  │
-│  │  │  - 异步状态机                                   │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                    接口层 (Interface)                  │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  fastboot_io.h       # I/O 接口                 │  │  │
-│  │  │  fastboot_sink.h     # 数据写入接口             │  │  │
-│  │  │  fastboot_port.h     # 硬件抽象接口             │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │                    端口层 (Port)                       │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │  fastboot_port.c     # 平台抽象实现             │  │  │
-│  │  │  fastboot_uart.c     # UART 驱动                │  │  │
-│  │  │  fastboot_iflash.c   # 内部 Flash 驱动          │  │  │
-│  │  │  fastboot_w25q64.c   # W25Q64 SPI Flash 驱动   │  │  │
-│  │  │  hal_msp_boot.c      # HAL MSP 初始化          │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     应用层 (Application)                      │
+│         调用 fastboot_ymodem_receive / fastboot_ota_install   │
+├──────────────────────────────────────────────────────────────┤
+│                     FastBoot 库                               │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                   公共接口层                            │  │
+│  │   fastboot_transport_t   传输接口 (read/write_byte)    │  │
+│  │   fastboot_writer_t      写入接口 (begin/write/poll)   │  │
+│  │   fastboot_flash_area_t  Flash 区域 (offset/size/ops)  │  │
+│  │   fastboot_runtime_t     运行时 (tick_ms/feed_wdg)     │  │
+│  ├────────────────────────────────────────────────────────┤  │
+│  │                   核心层 (Core)                         │  │
+│  │   fastboot_ymodem.c    YMODEM-1K 协议                 │  │
+│  │   fastboot_ota.c       FWOT 解析与安装                 │  │
+│  │   fastboot_staging.c   Staging 区管理                  │  │
+│  ├────────────────────────────────────────────────────────┤  │
+│  │                   队列层 (Queue)                        │  │
+│  │   fastboot_queue.c     异步写入环形队列                │  │
+│  ├────────────────────────────────────────────────────────┤  │
+│  │                   配置层 (Config)                       │  │
+│  │   fastboot_config.h    校验必需宏定义                   │  │
+│  │   fastboot_board_config.h  板级配置 (用户提供)          │  │
+│  └────────────────────────────────────────────────────────┘  │
+├──────────────────────────────────────────────────────────────┤
+│                     端口层 (Port)                             │
+│   fastboot_stm32_runtime.c   tick_ms / feed_watchdog 实现    │
+│   fastboot_uart.c            UART + DMA 环形接收             │
+│   fastboot_iflash.c          内部 Flash 读写擦除             │
+│   fastboot_w25q64.c          W25Q64 SPI Flash 驱动          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## 模块详解
+## 核心接口
 
-### 1. 核心模块 (Core)
+### fastboot_runtime_t — 运行时服务
 
-#### fastboot_ota.c
-
-OTA 包解析和安装模块。
-
-**功能:**
-- 解析 FWOT 格式的 OTA 包
-- 验证 magic、header CRC32、image CRC32
-- 验证 App 向量表有效性
-- 分块写入内部 Flash (2KB/次)
-- Readback 验证确保写入正确
-
-**关键流程:**
-```
-读取 OTA Header
-    │
-    ▼
-验证 Magic (0x544F5746)
-    │
-    ▼
-验证 Header CRC32
-    │
-    ▼
-验证 App 向量表
-    │
-    ▼
-擦除 App Flash (Sector 2-7)
-    │
-    ▼
-分块写入 (2KB/次)
-    │
-    ├─→ 计算流式 CRC32
-    │
-    ▼
-验证流式 CRC32
-    │
-    ▼
-Readback 验证
-    │
-    ▼
-安装完成
-```
-
-**关键函数:**
-```c
-fboot_status_t fastboot_ota_install(fastboot_ota_read_fn read_fn, void *ctx,
-                                    const fastboot_iflash_ops_t *iflash,
-                                    const fboot_log_t *log);
-```
-
-**OTA 安装流程:**
-- 流式 CRC32 验证: 每次从包源读取数据时累积 CRC，写入完成后与 header 中的 image_crc32 比较
-- 内部 Flash Readback CRC: 写入完成后，从内部 Flash 重新读取全部数据并计算 CRC，与 image_crc32 比较
-- 双重验证确保数据既正确传输又正确写入
-
-#### fastboot_staging.c
-
-Staging 区管理模块。
-
-**功能:**
-- 检查 W25Q64 OTA 暂存区
-- 读取并验证 magic
-- 调用 OTA 模块安装
-- 安装成功后清除暂存区
-
-**关键流程:**
-```
-初始化 W25Q64
-    │
-    ▼
-读取暂存区头部 (4B)
-    │
-    ▼
-验证 Magic (0x544F5746)
-    │
-    ▼
-调用 fastboot_ota_install()
-    │
-    ▼
-安装成功?
-    │
-    ├─ 是 → 擦除暂存区
-    │
-    └─ 否 → 返回错误
-```
-
-**关键函数:**
-```c
-fboot_status_t fastboot_staging_install_if_pending(
-    const fastboot_staging_store_t *store,
-    const fastboot_iflash_ops_t *iflash,
-    const fboot_log_t *log);
-```
-
-**参数说明:**
-- `store`: Staging 存储抽象，包含 `sink` (YMODEM 写入目标), `read()` (OTA 读取), `clear()` (安装后清除)
-- `iflash`: 内部 Flash 操作接口
-- `log`: 日志接口，可传 `NULL` 禁用日志
-
-**STM32F4 平台用法:**
-```c
-#include "fastboot_iflash.h"
-#include "fastboot_w25q64.h"
-
-const fastboot_staging_store_t *staging = fastboot_w25q64_staging_store();
-fboot_status_t rc = fastboot_staging_install_if_pending(
-    staging, fastboot_iflash_ops(), NULL);
-```
-
-#### fastboot_ymodem.c
-
-YMODEM-1K 协议接收模块。
-
-**功能:**
-- 实现 YMODEM-1K 协议
-- 支持 CRC-16 校验
-- 异步写入 (接收与 Flash 编程并行)
-- 错误重传机制
-
-**协议状态机:**
-```
-┌─────────┐
-│  IDLE   │
-└────┬────┘
-     │
-     ▼
-┌─────────┐     接收文件名包
-│ WAIT    │◄─────────────────────┐
-│ HEADER  │                      │
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     CRC 验证通过     │
-│ RECEIVE │──────────────────────┤
-│ DATA    │                      │
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     接收 EOT         │
-│ WAIT    │──────────────────────┤
-│ EOT     │                      │
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     接收结束包       │
-│ WAIT    │──────────────────────┘
-│ END     │
-└────┬────┘
-     │
-     ▼
-┌─────────┐
-│  DONE   │
-└─────────┘
-```
-
-**关键函数:**
-```c
-fboot_status_t fastboot_ymodem_receive(const fboot_io_t *io,
-                                       const fboot_sink_t *sink,
-                                       uint32_t *out_size);
-```
-
-### 2. 队列模块 (Queue)
-
-#### fastboot_queue.c
-
-异步写入队列模块。
-
-**功能:**
-- 环形缓冲区管理
-- 异步状态机
-- 接收与写入并行
-
-**数据结构:**
-```c
-typedef struct {
-    fboot_queue_slot_t slots[FBOOT_QUEUE_DEPTH];  // 8 个槽位
-    uint32_t head;                                 // 读指针
-    uint32_t tail;                                 // 写指针
-    uint32_t count;                                // 当前数量
-} fboot_queue_t;
-
-typedef struct {
-    uint8_t  packet[FBOOT_QUEUE_BUF_SIZE];  // 包数据 (1KB + 头部)
-    uint32_t offset;                         // Flash 偏移
-    uint32_t len;                            // 数据长度
-    bool     writing;                        // 正在写入标志
-} fboot_queue_slot_t;
-```
-
-**异步状态机:**
-```
-┌─────────┐
-│  IDLE   │
-└────┬────┘
-     │
-     ▼
-┌─────────┐     alloc_slot()
-│ ALLOC   │──────────────────────┐
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     commit()         │
-│ COMMIT  │──────────────────────┤
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     drain_one()      │
-│ DRAIN   │──────────────────────┤
-└────┬────┘                      │
-     │                           │
-     ▼                           │
-┌─────────┐     写入完成         │
-│  DONE   │──────────────────────┘
-└─────────┘
-```
-
-**关键函数:**
-```c
-void fastboot_queue_reset(fboot_queue_t *q);
-bool fastboot_queue_full(const fboot_queue_t *q);
-bool fastboot_queue_empty(const fboot_queue_t *q);
-fboot_queue_slot_t *fastboot_queue_alloc(fboot_queue_t *q);
-void fastboot_queue_commit(fboot_queue_t *q);
-fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q, const fboot_sink_t *sink, uint32_t *written);
-fboot_status_t fastboot_queue_drain_all(fboot_queue_t *q, const fboot_sink_t *sink, uint32_t *written);
-```
-
-### 3. 接口模块 (Interface)
-
-#### fastboot_io.h
-
-I/O 接口定义。
+提供系统 tick 和看门狗喂狗功能。
 
 ```c
 typedef struct {
-    size_t (*read)(void *ctx, uint8_t *data, size_t len, uint32_t timeout_ms);
+    uint32_t (*tick_ms)(void *ctx);
+    void (*feed_watchdog)(void *ctx);
+    void *ctx;
+} fastboot_runtime_t;
+```
+
+STM32F4 平台示例：
+
+```c
+static uint32_t my_tick(void *ctx)      { (void)ctx; return HAL_GetTick(); }
+static void     my_feed_wdg(void *ctx)  { (void)ctx; HAL_IWDG_Refresh(&hiwdg); }
+
+const fastboot_runtime_t runtime = { .tick_ms = my_tick, .feed_watchdog = my_feed_wdg, .ctx = NULL };
+```
+
+### fastboot_transport_t — 传输接口
+
+YMODEM 协议使用的字节级 I/O 接口。
+
+```c
+typedef struct {
+    size_t (*read)(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms);
     void (*write_byte)(void *ctx, uint8_t byte);
     void *ctx;
-} fboot_io_t;
+} fastboot_transport_t;
 ```
 
-**用途:**
-- YMODEM 协议的字节级 I/O
-- 支持超时机制
-- 支持上下文传递
+- `read`：从传输介质读取数据，返回实际读取字节数，支持超时
+- `write_byte`：发送单字节（用于 YMODEM 握手/应答）
 
-#### fastboot_sink.h
+### fastboot_flash_area_t — Flash 区域
 
-数据写入接口定义。
+描述一块 Flash 区域的范围和操作集，用于 staging 和 primary 分区。
+
+```c
+typedef struct {
+    fboot_status_t (*read)(void *ctx, uint32_t offset, uint8_t *buf, size_t len);
+    fboot_status_t (*write)(void *ctx, uint32_t offset, const uint8_t *buf, size_t len);
+    fboot_status_t (*erase)(void *ctx, uint32_t offset, uint32_t len);
+} fastboot_flash_ops_t;
+
+typedef struct {
+    uint32_t offset;           // 绝对起始地址
+    uint32_t size;             // 区域大小
+    const fastboot_flash_ops_t *ops;
+    void *ctx;
+} fastboot_flash_area_t;
+```
+
+提供内联辅助函数：`fastboot_flash_area_read()`、`fastboot_flash_area_write()`、`fastboot_flash_area_erase()`，自动进行边界检查并加上 `area->offset` 偏移。
+
+### fastboot_writer_t — 写入接口
+
+支持同步和异步写入模式。
 
 ```c
 typedef struct {
@@ -341,344 +118,324 @@ typedef struct {
     fboot_status_t (*poll)(void *ctx);
     bool (*busy)(void *ctx);
     void *ctx;
-} fboot_sink_t;
+} fastboot_writer_t;
 ```
 
-**用途:**
-- 支持同步和异步写入
-- 支持状态查询
-- 支持上下文传递
+- `begin`：通知写入目标总大小
+- `write`：同步写入数据块
+- `write_start`：启动异步写入
+- `poll`：轮询异步写入状态
+- `busy`：查询是否正在写入
 
-#### fastboot_port.h
+### fboot_log_t — 日志接口
 
-硬件抽象接口定义。
+可选的日志输出接口，用于 OTA 安装过程中的状态输出。传 `NULL` 时所有日志调用编译为空操作。
 
 ```c
-/* Tick / Delay */
-uint32_t fastboot_port_tick_ms(void);
-void fastboot_port_delay_ms(uint32_t ms);
-
-/* Watchdog */
-void fastboot_port_feed_watchdog(void);
-
-/* System */
-void fastboot_port_reset(void) __attribute__((noreturn));
-
-/* GPIO */
-bool fastboot_port_button_pressed(void);
-void fastboot_port_led_set(bool on);
-void fastboot_port_led_toggle(void);
+typedef struct {
+    void (*puts)(void *ctx, const char *s);
+    void (*dec32)(void *ctx, const char *label, uint32_t value);
+    void *ctx;
+} fboot_log_t;
 ```
 
-**用途:**
-- 隔离硬件依赖
-- 支持多平台移植
-- 提供统一的硬件访问接口
+当 `FASTBOOT_CFG_ENABLE_LOG` 为 0 时，`fboot_log_puts()` 和 `fboot_log_dec32()` 编译为空操作，零开销。
 
-### 4. 端口模块 (Port)
+## 模块详解
 
-#### fastboot_port.c
+### fastboot_ota.c — FWOT 安装流程
 
-平台抽象实现。
+解析 FWOT 格式 OTA 包并写入主 Flash。
 
-**STM32F4 实现:**
+**流程：** 读取 Header → 验证 Magic (0x544F5746) → 验证 Header CRC32 → 验证向量表 → 擦除主 Flash → 分块写入（流式 CRC32）→ 验证 CRC → Readback 验证 → 完成
+
 ```c
-uint32_t fastboot_port_tick_ms(void) {
-    return HAL_GetTick();
+fboot_status_t fastboot_ota_install(
+    const fastboot_flash_area_t *staging,   // 暂存区（OTA 包来源）
+    const fastboot_flash_area_t *primary,   // 主 Flash（安装目标）
+    const fastboot_image_policy_t *policy,  // 向量表验证策略
+    const fastboot_runtime_t *runtime,      // 运行时服务
+    const fboot_log_t *log);                // 日志接口（可为 NULL）
+```
+
+### fastboot_staging.c — Staging 区管理
+
+检查外部 Flash 暂存区是否有待安装固件，有则调用 `fastboot_ota_install()` 安装。
+
+```c
+fboot_status_t fastboot_staging_install_if_pending(
+    const fastboot_flash_area_t *staging,
+    const fastboot_flash_area_t *primary,
+    const fastboot_image_policy_t *policy,
+    const fastboot_runtime_t *runtime,
+    const fboot_log_t *log);
+```
+
+### fastboot_ymodem.c — YMODEM-1K 协议
+
+实现 YMODEM-1K 协议接收固件。
+
+```c
+fboot_status_t fastboot_ymodem_receive(
+    const fastboot_transport_t *transport,  // 传输接口
+    const fastboot_writer_t *writer,        // 写入目标
+    const fastboot_runtime_t *runtime,      // 运行时服务
+    uint32_t *out_size);                    // 接收字节数（输出）
+```
+
+**协议状态机：** IDLE → WAIT_HEADER（接收文件名包）→ RECEIVE_DATA（CRC 校验 + 数据接收）→ WAIT_EOT → WAIT_END → DONE
+
+### fastboot_queue.c — 异步写入队列
+
+环形缓冲区，实现 YMODEM 接收与 Flash 编程并行。
+
+```c
+void fastboot_queue_reset(fboot_queue_t *q);
+fboot_queue_slot_t *fastboot_queue_alloc(fboot_queue_t *q);
+void fastboot_queue_commit(fboot_queue_t *q);
+fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
+    const fastboot_writer_t *writer, const fastboot_runtime_t *runtime,
+    uint32_t *written);
+fboot_status_t fastboot_queue_drain_all(fboot_queue_t *q,
+    const fastboot_writer_t *writer, const fastboot_runtime_t *runtime,
+    uint32_t *written);
+```
+
+## 异步工作原理
+
+FastBoot 的异步机制是**单线程协作式调度**，不依赖 RTOS 或中断回调。核心思想：在等待串口数据的"空闲时间"里，去做 Flash 写入。
+
+### 数据流概览
+
+```
+PC ──UART──→ DMA 环形缓冲区 ──CPU 拷贝──→ 队列槽位 ──CPU──→ Flash 写入
+   (硬件自动)     (4096 B)       (alloc)    (commit)    (drain)
+```
+
+### 三层机制
+
+**1. DMA 环形缓冲区（硬件层）**
+
+STM32F4 端口使用 USART1 + DMA2 Stream2 循环模式接收。DMA 启动后永远在后台自动收数据，CPU 完全不参与。CPU 通过读取 NDTR 寄存器获取当前写入位置（head），与软件维护的读指针（tail）配合完成零拷贝读取。
+
+```c
+// port/stm32f4/fastboot_uart.c
+#define UART_RX_DMA_BUF_SIZE 4096u   // 可缓冲约 4 个 YMODEM-1K 包
+s_hdma_usart1_rx.Init.Mode = DMA_CIRCULAR;  // 循环模式，永不停止
+```
+
+**2. 包队列（协议层）**
+
+YMODEM 接收到的数据包不直接写 Flash，而是存入环形队列。生产者（YMODEM）通过 `alloc → 填充 → commit` 提交包，消费者（Flash 写入）通过 `drain_one` 取出并写入。
+
+```
+队列槽位: [slot0] [slot1] [slot2] ... [slot7]
+           ↑ head(消费)        tail(生产) ↑
+```
+
+**3. 见缝插针调度（应用层）**
+
+状态机在等待串口数据时调用 `service_writer()` 消费队列：
+
+```c
+// src/core/fastboot_ymodem.c — io_read_exact()
+while (done < len) {
+    got = transport->read(...);       // 尝试读串口
+    if (got > 0) { done += got; continue; }
+    service_writer();                 // 没数据？去写 Flash
 }
-
-void fastboot_port_delay_ms(uint32_t ms) {
-    HAL_Delay(ms);
-}
-
-void fastboot_port_reset(void) {
-    NVIC_SystemReset();
-}
-
-bool fastboot_port_button_pressed(void) {
-    return HAL_GPIO_ReadPin(PB1_USER_KEY1_GPIO_Port,
-                            PB1_USER_KEY1_Pin) == GPIO_PIN_RESET;
-}
-
-void fastboot_port_led_toggle(void) {
-    HAL_GPIO_TogglePin(PC13_LED_EN_GPIO_Port, PC13_LED_EN_Pin);
-}
 ```
 
-#### fastboot_uart.c
+此外还有两个水位保护：
+- **高水位（3/4 满）**：主动排水一个槽位
+- **队列满**：强制排水，否则不接收新包
 
-UART 驱动模块。
+### 时间线示例
 
-**功能:**
-- USART1 初始化 (460800 baud)
-- DMA 接收 (环形缓冲区)
-- 字节级读写
-- 调试输出
-
-**DMA 接收机制:**
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  DMA 环形缓冲区                                              │
-│                                                             │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │  Buffer (4KB)                                         │  │
-│  │  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐  │  │
-│  │  │     │     │     │     │     │     │     │     │  │  │
-│  │  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘  │  │
-│  │    ▲                           ▲                     │  │
-│  │    │                           │                     │  │
-│  │  tail (软件读指针)           head (DMA写指针)        │  │
-│  │    │                           │                     │  │
-│  │    └───────── NDTR ────────────┘                     │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                                                             │
-│  head = BUF_SIZE - NDTR                                     │
-│  tail = 软件维护                                            │
-│  可读数据 = (head - tail + BUF_SIZE) % BUF_SIZE            │
-└─────────────────────────────────────────────────────────────┘
+MCU:  [收包1] [收包2] [收包3] [写Flash#0] [收包4] [写Flash#1] [收包5] ...
+DMA:       [自动收PC数据→填入缓冲区]           [继续自动收...]
+PC:   [发包1→→→] [发包2→→→] [发包3→→→] [发包4→→→] [发包5→→→]
 ```
 
-**关键函数:**
-```c
-void fastboot_uart_init(void);
-void fastboot_uart_deinit(void);
-const fboot_io_t *fastboot_uart_io(void);
-void fastboot_uart_puts(const char *s);
-void fastboot_uart_hex32(const char *label, uint32_t val);
-void fastboot_uart_dec32(const char *label, uint32_t val);
-void fastboot_uart_status(const char *label, fboot_status_t rc);
-```
+MCU 发完 ACK 后去写 Flash，此时 PC 发出的下一个包由 DMA 硬件自动收入缓冲区，不会丢失。MCU 写完 Flash 回来后，从 DMA 缓冲区读出已收的数据继续处理。
 
-#### fastboot_iflash.c
+### 同步 vs 异步写入
 
-内部 Flash 驱动模块。
+`fastboot_writer_t` 支持两种模式，`drain_one` 自动选择：
 
-**功能:**
-- Sector 擦除
-- 2KB 编程
-- CRC32 校验
-- Readback 验证
+| 模式 | 回调 | 行为 |
+|---|---|---|
+| 同步 | `write` | 阻塞直到写入完成 |
+| 异步 | `write_start` + `poll` + `busy` | 启动后立即返回，后续 poll 轮询完成状态 |
 
-**Flash 操作流程:**
-```
-解锁 Flash
-    │
-    ▼
-擦除 Sector
-    │
-    ▼
-编程 (2KB/次)
-    │
-    ▼
-验证 (Readback + CRC)
-    │
-    ▼
-锁定 Flash
-```
+## 配置
 
-**关键函数:**
-```c
-fboot_status_t fastboot_iflash_erase_app(void);
-fboot_status_t fastboot_iflash_write(uint32_t addr, const uint8_t *data, size_t len);
-fboot_status_t fastboot_iflash_verify(uint32_t addr, const uint8_t *data, size_t len);
-```
+所有功能由 `fastboot_board_config.h` 中的宏控制，`fastboot_config.h` 负责校验必需宏是否存在。
 
-#### fastboot_w25q64.c
+| 宏 | 类型 | 说明 |
+|---|---|---|
+| `FASTBOOT_BOARD_CONFIG_INCLUDED` | define | 板级配置标记，必须定义 |
+| `FASTBOOT_CFG_ENABLE_YMODEM` | 0/1 | 启用 YMODEM 接收模块 |
+| `FASTBOOT_CFG_ENABLE_FWOT` | 0/1 | 启用 FWOT 包解析与安装 |
+| `FASTBOOT_CFG_ENABLE_STAGING` | 0/1 | 启用 Staging 区管理 |
+| `FASTBOOT_CFG_ENABLE_ASYNC_SINK` | 0/1 | 启用异步写入（队列模式） |
+| `FASTBOOT_CFG_ENABLE_READBACK_VERIFY` | 0/1 | 启用写入后回读验证 |
+| `FASTBOOT_CFG_ENABLE_LOG` | 0/1 | 启用日志输出 |
+| `FASTBOOT_CFG_ENABLE_WATCHDOG` | 0/1 | 启用看门狗喂狗 |
+| `FASTBOOT_CFG_QUEUE_DEPTH` | ≥2 | 队列槽位数 |
+| `FASTBOOT_CFG_YMODEM_PACKET_SIZE` | ≥128 | YMODEM 包大小（字节） |
+| `FASTBOOT_CFG_STAGING_CAPACITY` | uint32 | 暂存区总容量（字节） |
 
-W25Q64 SPI Flash 驱动模块。
-
-**功能:**
-- JEDEC ID 读取
-- 4KB Sector 擦除
-- 256B Page 编程
-- 数据读取
-- 异步写入支持
-
-**SPI 通信协议:**
-```
-┌─────────────────────────────────────────────────────────────┐
-│  命令格式                                                    │
-│                                                             │
-│  读取 JEDEC ID:                                             │
-│    发送: 0x9F                                               │
-│    接收: [制造商ID] [设备ID高] [设备ID低]                   │
-│                                                             │
-│  读取数据:                                                  │
-│    发送: 0x03 [地址23-16] [地址15-8] [地址7-0]             │
-│    接收: [数据...]                                          │
-│                                                             │
-│  擦除 Sector (4KB):                                         │
-│    发送: 0x20 [地址23-16] [地址15-8] [地址7-0]             │
-│    等待: 忙标志清除                                         │
-│                                                             │
-│  编程 Page (256B):                                          │
-│    发送: 0x02 [地址23-16] [地址15-8] [地址7-0] [数据...]   │
-│    等待: 忙标志清除                                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**关键函数:**
-```c
-fboot_status_t fastboot_w25q64_init(void);
-uint32_t fastboot_w25q64_jedec_id(void);
-fboot_status_t fastboot_w25q64_read(uint32_t offset, uint8_t *data, size_t len);
-fboot_status_t fastboot_w25q64_write(uint32_t offset, const uint8_t *data, size_t len);
-fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset);
-const fastboot_staging_store_t *fastboot_w25q64_staging_store(void); /* preferred */
-const fboot_sink_t *fastboot_w25q64_ota_sink(void); /* legacy: use fastboot_w25q64_staging_store() */
-```
-
-## 移植指南
-
-### 1. 创建 fastboot_config.h
+板级配置示例（`fastboot_board_config.h`）：
 
 ```c
-#ifndef FASTBOOT_CONFIG_H
-#define FASTBOOT_CONFIG_H
+#ifndef FASTBOOT_BOARD_CONFIG_H
+#define FASTBOOT_BOARD_CONFIG_H
 
-/* 内部 Flash */
-#define FASTBOOT_FLASH_BASE          0x08000000u
-#define FASTBOOT_FLASH_SIZE          0x00008000u  /* 32 KiB */
+#define FASTBOOT_BOARD_CONFIG_INCLUDED     1
+#define FASTBOOT_CFG_ENABLE_YMODEM         1
+#define FASTBOOT_CFG_ENABLE_FWOT           1
+#define FASTBOOT_CFG_ENABLE_STAGING        1
+#define FASTBOOT_CFG_ENABLE_ASYNC_SINK     1
+#define FASTBOOT_CFG_ENABLE_READBACK_VERIFY 1
+#define FASTBOOT_CFG_ENABLE_LOG            1
+#define FASTBOOT_CFG_ENABLE_WATCHDOG       1
+#define FASTBOOT_CFG_QUEUE_DEPTH           8
+#define FASTBOOT_CFG_YMODEM_PACKET_SIZE    1024
+#define FASTBOOT_CFG_STAGING_CAPACITY      0x400000u
 
-#define FASTBOOT_APP_FLASH_BASE      0x08008000u
-#define FASTBOOT_APP_FLASH_SIZE      0x00078000u  /* 480 KiB */
-#define FASTBOOT_APP_FLASH_END       (FASTBOOT_APP_FLASH_BASE + FASTBOOT_APP_FLASH_SIZE)
-
-/* SRAM */
-#define FASTBOOT_SRAM_BASE           0x20000000u
-#define FASTBOOT_SRAM_SIZE           0x00020000u  /* 128 KiB */
-#define FASTBOOT_SRAM_END            (FASTBOOT_SRAM_BASE + FASTBOOT_SRAM_SIZE)
-
-/* 外部 Flash */
-#define FASTBOOT_EXTFLASH_OTA_OFFSET 0x000000u
-#define FASTBOOT_EXTFLASH_OTA_SIZE   0x400000u   /* 4 MiB */
+#define FASTBOOT_EXTFLASH_OTA_SIZE         0x400000u
+#define FASTBOOT_EXTFLASH_OTA_OFFSET       0x000000u
+#define FASTBOOT_APP_FLASH_BASE            0x08008000u
+#define FASTBOOT_APP_FLASH_SIZE            0x00078000u
+#define FASTBOOT_APP_FLASH_END             0x08080000u
+#define FASTBOOT_SRAM_BASE                 0x20000000u
+#define FASTBOOT_SRAM_END                  0x20020000u
 
 #endif
 ```
 
-### 2. 实现 fastboot_port_* 函数
+## 移植指南
+
+### 1. 创建 fastboot_board_config.h
+
+在项目配置目录中创建 `fastboot_board_config.h`，定义所有 `FASTBOOT_CFG_*` 宏和内存布局宏（参见上方配置章节）。
+
+### 2. 实现 fastboot_runtime_t
 
 ```c
-#include "fastboot_port.h"
-#include "your_platform_hal.h"
+#include "fastboot_runtime.h"
+#include "your_hal.h"
 
-uint32_t fastboot_port_tick_ms(void) {
-    return HAL_GetTick();
-}
+static uint32_t port_tick_ms(void *ctx) { (void)ctx; return HAL_GetTick(); }
+static void port_feed_wdg(void *ctx)    { (void)ctx; /* 喂狗 */ }
 
-void fastboot_port_delay_ms(uint32_t ms) {
-    HAL_Delay(ms);
-}
-
-void fastboot_port_feed_watchdog(void) {
-    /* 喂狗 */
-}
-
-void fastboot_port_reset(void) {
-    NVIC_SystemReset();
-}
-
-bool fastboot_port_button_pressed(void) {
-    return HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin) == GPIO_PIN_RESET;
-}
-
-void fastboot_port_led_set(bool on) {
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-void fastboot_port_led_toggle(void) {
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-}
+const fastboot_runtime_t g_runtime = {
+    .tick_ms      = port_tick_ms,
+    .feed_watchdog = port_feed_wdg,
+    .ctx           = NULL,
+};
 ```
 
-### 3. 实现硬件驱动
+STM32F4 移植可直接使用 `port/stm32f4/fastboot_stm32_runtime.c` 提供的 `fastboot_stm32_runtime()`。
 
-- `fastboot_uart.c/h` — UART 收发
-- `fastboot_iflash.c/h` — 内部 Flash 读写擦除
-- `fastboot_w25q64.c/h` — 外部 SPI Flash 驱动
+### 3. 实现 fastboot_transport_t
 
-### 4. 集成到项目
+```c
+#include "fastboot_transport.h"
+
+// 基于 UART DMA 环形缓冲区的实现
+static size_t uart_read(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms) {
+    // 从 DMA 环形缓冲区读取，超时返回实际读取字节数
+}
+static void uart_write_byte(void *ctx, uint8_t byte) {
+    // 发送单字节
+}
+
+const fastboot_transport_t g_transport = {
+    .read       = uart_read,
+    .write_byte = uart_write_byte,
+    .ctx        = NULL,
+};
+```
+
+### 4. 实现 fastboot_flash_area_t
+
+```c
+#include "fastboot_flash.h"
+
+// 内部 Flash 操作
+static fboot_status_t iflash_read(void *ctx, uint32_t off, uint8_t *b, size_t l)  { /* ... */ }
+static fboot_status_t iflash_write(void *ctx, uint32_t off, const uint8_t *b, size_t l) { /* ... */ }
+static fboot_status_t iflash_erase(void *ctx, uint32_t off, uint32_t l) { /* ... */ }
+
+static const fastboot_flash_ops_t iflash_ops = {
+    .read = iflash_read, .write = iflash_write, .erase = iflash_erase,
+};
+
+const fastboot_flash_area_t primary = {
+    .offset = FASTBOOT_APP_FLASH_BASE,
+    .size   = FASTBOOT_APP_FLASH_SIZE,
+    .ops    = &iflash_ops,
+    .ctx    = NULL,
+};
+```
+
+### 5. 实现 fastboot_writer_t
+
+可使用队列层提供的 writer，或自行实现同步 writer。
+
+### 6. 集成到项目
 
 ```cmake
-# CMakeLists.txt
 set(FASTBOOT_PORT "stm32f4" CACHE STRING "" FORCE)
 set(FASTBOOT_CONFIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/00_Config" CACHE PATH "" FORCE)
-set(FASTBOOT_PLATFORM_INCLUDES ... CACHE PATH "" FORCE)
+set(FASTBOOT_PLATFORM_INCLUDES ... CACHE STRING "" FORCE)
 set(FASTBOOT_ENABLE_OTA ON CACHE BOOL "" FORCE)
 add_subdirectory(fastboot)
-
 target_link_libraries(your_target PRIVATE fastboot)
 ```
 
-### Host-side tests
-
-```bash
-cmake -S . -B build-host -DFASTBOOT_BUILD_TESTS=ON
-cmake --build build-host
-ctest --test-dir build-host -C Debug --output-on-failure
-```
-
-When `FASTBOOT_PORT=none`, FWOT install/staging sources are disabled and the
-host build covers the hardware-independent YMODEM and queue code.
-
 ## API 参考
 
-### 核心 API
+### fastboot_ymodem_receive()
 
-#### fastboot_staging_install_if_pending()
+```c
+fboot_status_t fastboot_ymodem_receive(
+    const fastboot_transport_t *transport,
+    const fastboot_writer_t *writer,
+    const fastboot_runtime_t *runtime,
+    uint32_t *out_size);
+```
+
+通过 YMODEM-1K 协议接收固件数据并写入目标。返回 `FB_OK` 表示成功。
+
+### fastboot_staging_install_if_pending()
 
 ```c
 fboot_status_t fastboot_staging_install_if_pending(
-    const fastboot_staging_store_t *store,
-    const fastboot_iflash_ops_t *iflash,
+    const fastboot_flash_area_t *staging,
+    const fastboot_flash_area_t *primary,
+    const fastboot_image_policy_t *policy,
+    const fastboot_runtime_t *runtime,
     const fboot_log_t *log);
 ```
 
-检查暂存区，如果有新固件则安装到内部 Flash。安装使用流式 CRC 和内部 Flash Readback CRC 双重验证。
+检查暂存区是否有待安装固件（Magic = 0x544F5746），有则调用 OTA 安装。返回 `FB_OK` 安装成功，`FB_NO_UPDATE` 无更新。
 
-**参数:**
-- `store`: Staging 存储抽象 (如 `fastboot_w25q64_staging_store()`)，提供 `read()`, `clear()`, `sink`
-- `iflash`: 内部 Flash 操作接口 (如 `fastboot_iflash_ops()`)
-- `log`: 日志接口 (可传 `NULL`)
-
-**STM32F4 平台用法:**
-```c
-#include "fastboot_iflash.h"
-#include "fastboot_w25q64.h"
-
-const fastboot_staging_store_t *staging = fastboot_w25q64_staging_store();
-
-/* YMODEM 接收 */
-fastboot_ymodem_receive(fastboot_uart_io(), staging->sink, &received_size);
-
-/* OTA 安装 */
-fboot_status_t rc = fastboot_staging_install_if_pending(
-    staging, fastboot_iflash_ops(), NULL);
-```
-
-**返回值:**
-- `FB_OK`: 安装成功
-- `FB_NO_UPDATE`: 无更新
-- 其他: 错误码
-
-#### fastboot_ymodem_receive()
+### fastboot_ota_install()
 
 ```c
-fboot_status_t fastboot_ymodem_receive(const fboot_io_t *io,
-                                       const fboot_sink_t *sink,
-                                       uint32_t *out_size);
+fboot_status_t fastboot_ota_install(
+    const fastboot_flash_area_t *staging,
+    const fastboot_flash_area_t *primary,
+    const fastboot_image_policy_t *policy,
+    const fastboot_runtime_t *runtime,
+    const fboot_log_t *log);
 ```
 
-通过 YMODEM 协议接收固件。
-
-**参数:**
-- `io`: I/O 接口 (UART)
-- `sink`: 写入目标 (W25Q64)
-- `out_size`: 接收字节数 (输出)
-
-**返回值:**
-- `FB_OK`: 接收成功
-- 其他: 错误码
+从暂存区读取 FWOT 包并安装到主 Flash。
 
 ### 状态码
 
@@ -698,62 +455,28 @@ typedef enum {
 } fboot_status_t;
 ```
 
-## 内部实现
+## 构建与测试
 
-### CRC32 算法
+### CMake 构建
 
-```c
-uint32_t fastboot_crc32(const uint8_t *data, size_t len, uint32_t seed) {
-    uint32_t crc = seed ^ 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (uint32_t bit = 0; bit < 8; ++bit) {
-            uint32_t mask = 0 - (crc & 1);
-            crc = (crc >> 1) ^ (0xEDB88320u & mask);
-        }
-    }
-    return crc ^ 0xFFFFFFFFu;
-}
+```bash
+cmake -S . -B build -G Ninja
+cmake --build build
 ```
 
-### CRC-16 XMODEM 算法
+### Host 端测试
 
-```c
-uint16_t crc16_xmodem(const uint8_t *data, size_t len) {
-    uint16_t crc = 0;
-    while (len-- > 0) {
-        crc ^= (uint16_t)(*data++) << 8;
-        for (uint32_t i = 0; i < 8; ++i) {
-            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
-                                 : (uint16_t)(crc << 1);
-        }
-    }
-    return crc;
-}
+```bash
+cmake -S . -B build-host -DFASTBOOT_BUILD_TESTS=ON
+cmake --build build-host
+ctest --test-dir build-host -C Debug --output-on-failure
 ```
 
-### 向量表验证
+`FASTBOOT_PORT=none` 时，CMake 自动生成 `fastboot_board_config.h` 到构建目录，提供测试所需的全部配置宏。OTA/Staging 源码仍会编译（`FASTBOOT_ENABLE_OTA` 在 tests 模式下由 CMake 强制开启）。
 
-```c
-bool app_vector_is_valid(uint32_t app_base) {
-    uint32_t initial_sp = *(const uint32_t *)app_base;
-    uint32_t reset_handler = *(const uint32_t *)(app_base + 4);
+### 集成到已有项目
 
-    /* SP 在 SRAM 范围内 */
-    if (initial_sp < FASTBOOT_SRAM_BASE || initial_sp > FASTBOOT_SRAM_END)
-        return false;
-
-    /* Reset_Handler 在 App Flash 范围内 */
-    if (reset_handler < FASTBOOT_APP_FLASH_BASE || reset_handler >= FASTBOOT_APP_FLASH_END)
-        return false;
-
-    /* Thumb 指令位 */
-    if ((reset_handler & 1) == 0)
-        return false;
-
-    return true;
-}
-```
+参见上方 [移植指南](#移植指南) 第 6 步的 CMake 配置。
 
 ## 许可证
 

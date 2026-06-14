@@ -5,68 +5,90 @@
 #include <string.h>
 
 #define FAKE_FLASH_SIZE  (FASTBOOT_APP_FLASH_SIZE)
-#define FAKE_FLASH_BASE  FASTBOOT_APP_FLASH_BASE
 
 static uint8_t s_fake_flash[FAKE_FLASH_SIZE];
 static uint32_t s_erase_count;
 static uint32_t s_write_count;
 
-static fboot_status_t fake_erase_app(void *ctx)
+static uint32_t runtime_tick_ms(void *ctx)
 {
     (void)ctx;
-    memset(s_fake_flash, 0xFFu, sizeof(s_fake_flash));
-    ++s_erase_count;
+    return 0u;
+}
+
+static const fastboot_runtime_t s_runtime = {
+    runtime_tick_ms,
+    NULL,
+    NULL,
+};
+
+static fboot_status_t primary_read(void *ctx, uint32_t offset,
+                                   uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    if (offset + len > FAKE_FLASH_SIZE) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(buf, &s_fake_flash[offset], len);
     return FB_OK;
 }
 
-static fboot_status_t fake_write(void *ctx, uint32_t addr,
-                                 const uint8_t *data, size_t len)
+static fboot_status_t primary_write(void *ctx, uint32_t offset,
+                                    const uint8_t *buf, size_t len)
 {
-    uint32_t offset;
-
     (void)ctx;
-    if (addr < FAKE_FLASH_BASE || addr + len > FAKE_FLASH_BASE + FAKE_FLASH_SIZE) {
+    if (offset + len > FAKE_FLASH_SIZE) {
         return FB_ERR_RANGE;
     }
-    offset = addr - FAKE_FLASH_BASE;
-    memcpy(&s_fake_flash[offset], data, len);
+    memcpy(&s_fake_flash[offset], buf, len);
     ++s_write_count;
     return FB_OK;
 }
 
-static fboot_status_t fake_verify(void *ctx, uint32_t addr,
-                                  const uint8_t *data, size_t len)
+static fboot_status_t primary_erase(void *ctx, uint32_t offset, uint32_t len)
 {
-    uint32_t offset;
-
     (void)ctx;
-    if (addr < FAKE_FLASH_BASE || addr + len > FAKE_FLASH_BASE + FAKE_FLASH_SIZE) {
+    if (offset + len > FAKE_FLASH_SIZE) {
         return FB_ERR_RANGE;
     }
-    offset = addr - FAKE_FLASH_BASE;
-    return memcmp(&s_fake_flash[offset], data, len) == 0 ? FB_OK : FB_ERR_VERIFY;
-}
-
-static fboot_status_t fake_iflash_read(void *ctx, uint32_t addr, uint8_t *data,
-                                       size_t len)
-{
-    uint32_t offset;
-
-    (void)ctx;
-    if (addr < FAKE_FLASH_BASE || addr + len > FAKE_FLASH_BASE + FAKE_FLASH_SIZE) {
-        return FB_ERR_RANGE;
-    }
-    offset = addr - FAKE_FLASH_BASE;
-    memcpy(data, &s_fake_flash[offset], len);
+    memset(&s_fake_flash[offset], 0xFFu, len);
+    ++s_erase_count;
     return FB_OK;
 }
 
-static const fastboot_iflash_ops_t s_iflash_ops = {
-    fake_erase_app,
-    fake_write,
-    fake_verify,
-    fake_iflash_read,
+static const fastboot_flash_ops_t s_primary_ops = {
+    primary_read,
+    primary_write,
+    primary_erase,
+};
+
+static fastboot_flash_area_t s_primary = {
+    0u,
+    FAKE_FLASH_SIZE,
+    &s_primary_ops,
     NULL,
+};
+
+static bool s_corrupt_readback;
+
+static fboot_status_t primary_read_corruptible(void *ctx, uint32_t offset,
+                                               uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    if (offset + len > FAKE_FLASH_SIZE) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(buf, &s_fake_flash[offset], len);
+    if (s_corrupt_readback && len > 0u) {
+        buf[0] ^= 0xFFu;
+    }
+    return FB_OK;
+}
+
+static const fastboot_flash_ops_t s_primary_ops_corrupt = {
+    primary_read_corruptible,
+    primary_write,
+    primary_erase,
 };
 
 typedef struct {
@@ -74,16 +96,56 @@ typedef struct {
     size_t len;
 } fake_source_t;
 
-static int fake_read(uint32_t offset, uint8_t *data, size_t len, void *ctx)
+static fake_source_t s_staging_src;
+
+static fboot_status_t staging_read(void *ctx, uint32_t offset,
+                                   uint8_t *buf, size_t len)
 {
     fake_source_t *src = (fake_source_t *)ctx;
 
     if (offset + len > src->len) {
-        return -1;
+        return FB_ERR_RANGE;
     }
-    memcpy(data, &src->data[offset], len);
-    return 0;
+    memcpy(buf, &src->data[offset], len);
+    return FB_OK;
 }
+
+static const fastboot_flash_ops_t s_staging_ops = {
+    staging_read,
+    NULL,
+    NULL,
+};
+
+static bool vector_is_valid(const uint8_t *vector, size_t len,
+                            uint32_t load_addr, uint32_t image_size, void *ctx)
+{
+    uint32_t sp;
+    uint32_t reset;
+
+    (void)load_addr;
+    (void)image_size;
+    (void)ctx;
+    if (len < 8u) {
+        return false;
+    }
+    memcpy(&sp, vector, 4u);
+    memcpy(&reset, vector + 4u, 4u);
+    if (sp < FASTBOOT_SRAM_BASE || sp > FASTBOOT_SRAM_END) {
+        return false;
+    }
+    if (reset < FASTBOOT_APP_FLASH_BASE ||
+        reset > FASTBOOT_APP_FLASH_END) {
+        return false;
+    }
+    return true;
+}
+
+static const fastboot_image_policy_t s_policy = {
+    FASTBOOT_APP_FLASH_BASE,
+    FASTBOOT_APP_FLASH_SIZE,
+    vector_is_valid,
+    NULL,
+};
 
 static uint32_t build_fwot(uint8_t *buf, const uint8_t *image, uint32_t image_size)
 {
@@ -120,11 +182,18 @@ static void build_valid_vector(uint8_t *vec)
 static void test_install_null_params(void)
 {
     fboot_status_t rc;
+    fastboot_flash_area_t staging = {0u, 0u, &s_staging_ops, &s_staging_src};
 
-    rc = fastboot_ota_install(NULL, NULL, &s_iflash_ops, NULL);
+    rc = fastboot_ota_install(NULL, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_PARAM);
 
-    rc = fastboot_ota_install(fake_read, NULL, NULL, NULL);
+    rc = fastboot_ota_install(&staging, NULL, &s_policy, &s_runtime, NULL);
+    assert(rc == FB_ERR_PARAM);
+
+    rc = fastboot_ota_install(&staging, &s_primary, NULL, &s_runtime, NULL);
+    assert(rc == FB_ERR_PARAM);
+
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, NULL, NULL);
     assert(rc == FB_ERR_PARAM);
 }
 
@@ -132,7 +201,7 @@ static void test_install_invalid_magic(void)
 {
     uint8_t pkg[128];
     fastboot_ota_header_t *hdr = (fastboot_ota_header_t *)pkg;
-    fake_source_t src = {pkg, sizeof(pkg)};
+    fastboot_flash_area_t staging;
     fboot_status_t rc;
 
     memset(pkg, 0, sizeof(pkg));
@@ -145,7 +214,14 @@ static void test_install_invalid_magic(void)
     hdr->header_crc32 = 0u;
     hdr->header_crc32 = fastboot_crc32(pkg, sizeof(fastboot_ota_header_t), 0u);
 
-    rc = fastboot_ota_install(fake_read, &src, &s_iflash_ops, NULL);
+    s_staging_src.data = pkg;
+    s_staging_src.len = sizeof(pkg);
+    staging.offset = 0u;
+    staging.size = sizeof(pkg);
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
+
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_FORMAT);
 }
 
@@ -154,7 +230,7 @@ static void test_install_bad_crc(void)
     uint8_t image[8];
     uint8_t pkg[256];
     fastboot_ota_header_t *hdr = (fastboot_ota_header_t *)pkg;
-    fake_source_t src = {pkg, sizeof(pkg)};
+    fastboot_flash_area_t staging;
     fboot_status_t rc;
 
     build_valid_vector(image);
@@ -170,7 +246,14 @@ static void test_install_bad_crc(void)
     hdr->header_crc32 = fastboot_crc32(pkg, sizeof(fastboot_ota_header_t), 0u);
     memcpy(&pkg[sizeof(fastboot_ota_header_t)], image, 8u);
 
-    rc = fastboot_ota_install(fake_read, &src, &s_iflash_ops, NULL);
+    s_staging_src.data = pkg;
+    s_staging_src.len = sizeof(pkg);
+    staging.offset = 0u;
+    staging.size = sizeof(pkg);
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
+
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_CRC);
 }
 
@@ -178,16 +261,20 @@ static void test_install_valid_small(void)
 {
     uint8_t image[8];
     uint8_t pkg[256];
-    fake_source_t src;
+    fastboot_flash_area_t staging;
     fboot_status_t rc;
 
     build_valid_vector(image);
-    src.data = pkg;
-    src.len = build_fwot(pkg, image, 8u);
+    s_staging_src.data = pkg;
+    s_staging_src.len = build_fwot(pkg, image, 8u);
+    staging.offset = 0u;
+    staging.size = s_staging_src.len;
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
 
     s_erase_count = 0u;
     s_write_count = 0u;
-    rc = fastboot_ota_install(fake_read, &src, &s_iflash_ops, NULL);
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_OK);
     assert(s_erase_count == 1u);
     assert(s_write_count >= 1u);
@@ -198,7 +285,7 @@ static void test_install_invalid_vector(void)
 {
     uint8_t image[8];
     uint8_t pkg[256];
-    fake_source_t src;
+    fastboot_flash_area_t staging;
     fboot_status_t rc;
 
     memset(image, 0, sizeof(image));
@@ -210,49 +297,40 @@ static void test_install_invalid_vector(void)
     image[5] = 0x00u;
     image[6] = 0x00u;
     image[7] = 0x00u;
-    src.data = pkg;
-    src.len = build_fwot(pkg, image, 8u);
+    s_staging_src.data = pkg;
+    s_staging_src.len = build_fwot(pkg, image, 8u);
+    staging.offset = 0u;
+    staging.size = s_staging_src.len;
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
 
-    rc = fastboot_ota_install(fake_read, &src, &s_iflash_ops, NULL);
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_FORMAT);
-}
-
-static bool s_corrupt_readback;
-
-static fboot_status_t fake_iflash_read_corruptible(void *ctx, uint32_t addr,
-                                                   uint8_t *data, size_t len)
-{
-    uint32_t offset;
-
-    (void)ctx;
-    if (addr < FAKE_FLASH_BASE || addr + len > FAKE_FLASH_BASE + FAKE_FLASH_SIZE) {
-        return FB_ERR_RANGE;
-    }
-    offset = addr - FAKE_FLASH_BASE;
-    memcpy(data, &s_fake_flash[offset], len);
-    if (s_corrupt_readback && len > 0u) {
-        data[0] ^= 0xFFu;
-    }
-    return FB_OK;
 }
 
 static void test_install_readback_corruption(void)
 {
     uint8_t image[8];
     uint8_t pkg[256];
-    fake_source_t src;
-    fastboot_iflash_ops_t corrupt_ops;
+    fastboot_flash_area_t staging;
+    fastboot_flash_area_t primary;
     fboot_status_t rc;
 
     build_valid_vector(image);
-    src.data = pkg;
-    src.len = build_fwot(pkg, image, 8u);
+    s_staging_src.data = pkg;
+    s_staging_src.len = build_fwot(pkg, image, 8u);
+    staging.offset = 0u;
+    staging.size = s_staging_src.len;
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
 
-    corrupt_ops = s_iflash_ops;
-    corrupt_ops.read = fake_iflash_read_corruptible;
+    primary.offset = 0u;
+    primary.size = FAKE_FLASH_SIZE;
+    primary.ops = &s_primary_ops_corrupt;
+    primary.ctx = NULL;
 
     s_corrupt_readback = true;
-    rc = fastboot_ota_install(fake_read, &src, &corrupt_ops, NULL);
+    rc = fastboot_ota_install(&staging, &primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_VERIFY);
     s_corrupt_readback = false;
 }

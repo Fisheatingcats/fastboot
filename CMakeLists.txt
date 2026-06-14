@@ -51,7 +51,7 @@ endif()
 set(FASTBOOT_PORT_SOURCES "")
 if(FASTBOOT_PORT STREQUAL "stm32f4")
     list(APPEND FASTBOOT_PORT_SOURCES
-        port/stm32f4/fastboot_port.c
+        port/stm32f4/fastboot_stm32_runtime.c
         port/stm32f4/fastboot_uart.c
         port/stm32f4/fastboot_iflash.c
         port/stm32f4/fastboot_w25q64.c
@@ -77,14 +77,31 @@ target_include_directories(fastboot PUBLIC
 # without pulling in STM32 HAL or board headers. Embedded applications should
 # provide FASTBOOT_CONFIG_DIR instead.
 if(FASTBOOT_PORT STREQUAL "none" AND NOT DEFINED FASTBOOT_CONFIG_DIR)
-    target_compile_definitions(fastboot PUBLIC
-        FASTBOOT_EXTFLASH_OTA_SIZE=0x400000u
-        FASTBOOT_EXTFLASH_OTA_OFFSET=0x000000u
-        FASTBOOT_APP_FLASH_BASE=0x08008000u
-        FASTBOOT_APP_FLASH_SIZE=0x00078000u
-        FASTBOOT_APP_FLASH_END=0x08080000u
-        FASTBOOT_SRAM_BASE=0x20000000u
-        FASTBOOT_SRAM_END=0x20020000u
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/fastboot_board_config.h" "\
+#ifndef FASTBOOT_BOARD_CONFIG_H\n\
+#define FASTBOOT_BOARD_CONFIG_H\n\
+#define FASTBOOT_BOARD_CONFIG_INCLUDED 1\n\
+#define FASTBOOT_CFG_ENABLE_YMODEM           1\n\
+#define FASTBOOT_CFG_ENABLE_FWOT             1\n\
+#define FASTBOOT_CFG_ENABLE_STAGING          1\n\
+#define FASTBOOT_CFG_ENABLE_ASYNC_SINK       1\n\
+#define FASTBOOT_CFG_ENABLE_READBACK_VERIFY  1\n\
+#define FASTBOOT_CFG_ENABLE_LOG              0\n\
+#define FASTBOOT_CFG_ENABLE_WATCHDOG         1\n\
+#define FASTBOOT_CFG_QUEUE_DEPTH             8\n\
+#define FASTBOOT_CFG_YMODEM_PACKET_SIZE      1024\n\
+#define FASTBOOT_CFG_STAGING_CAPACITY        0x400000u\n\
+#define FASTBOOT_EXTFLASH_OTA_SIZE           0x400000u\n\
+#define FASTBOOT_EXTFLASH_OTA_OFFSET         0x000000u\n\
+#define FASTBOOT_APP_FLASH_BASE              0x08008000u\n\
+#define FASTBOOT_APP_FLASH_SIZE              0x00078000u\n\
+#define FASTBOOT_APP_FLASH_END               0x08080000u\n\
+#define FASTBOOT_SRAM_BASE                   0x20000000u\n\
+#define FASTBOOT_SRAM_END                    0x20020000u\n\
+#endif\n\
+")
+    target_include_directories(fastboot PUBLIC
+        "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
 

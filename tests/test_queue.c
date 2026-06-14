@@ -8,10 +8,17 @@
 
 static uint32_t s_watchdog_count;
 
-void fastboot_port_feed_watchdog(void)
+static void runtime_feed_watchdog(void *ctx)
 {
+    (void)ctx;
     ++s_watchdog_count;
 }
+
+static const fastboot_runtime_t s_runtime = {
+    NULL,
+    runtime_feed_watchdog,
+    NULL,
+};
 
 typedef struct {
     uint8_t data[64];
@@ -94,7 +101,7 @@ static void test_sync_drain(void)
     sync_ctx_t sync = {0};
     uint32_t written = 0u;
     fboot_queue_slot_t *slot;
-    const fboot_sink_t sink = {
+    const fastboot_writer_t writer = {
         sync_begin,
         sync_write,
         NULL,
@@ -111,7 +118,7 @@ static void test_sync_drain(void)
     fastboot_queue_commit(&queue);
     assert(!fastboot_queue_empty(&queue));
 
-    assert(fastboot_queue_drain_one(&queue, &sink, &written) == FB_OK);
+    assert(fastboot_queue_drain_one(&queue, &writer, &s_runtime, &written) == FB_OK);
     assert(fastboot_queue_empty(&queue));
     assert(written == 7u);
     assert(memcmp(&sync.data[4], "abc", 3u) == 0);
@@ -123,7 +130,7 @@ static void test_async_drain_keeps_slot_until_poll_done(void)
     async_ctx_t async = {0};
     uint32_t written = 0u;
     fboot_queue_slot_t *slot;
-    const fboot_sink_t sink = {
+    const fastboot_writer_t writer = {
         NULL,
         NULL,
         async_write_start,
@@ -138,9 +145,9 @@ static void test_async_drain_keeps_slot_until_poll_done(void)
     fill_slot(slot, 0u, "xyz");
     fastboot_queue_commit(&queue);
 
-    assert(fastboot_queue_drain_one(&queue, &sink, &written) == FB_BUSY);
+    assert(fastboot_queue_drain_one(&queue, &writer, &s_runtime, &written) == FB_BUSY);
     assert(!fastboot_queue_empty(&queue));
-    assert(fastboot_queue_drain_one(&queue, &sink, &written) == FB_OK);
+    assert(fastboot_queue_drain_one(&queue, &writer, &s_runtime, &written) == FB_OK);
     assert(fastboot_queue_empty(&queue));
     assert(written == 3u);
     assert(memcmp(async.data, "xyz", 3u) == 0);

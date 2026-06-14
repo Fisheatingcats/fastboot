@@ -1,8 +1,10 @@
 #include "fastboot_w25q64.h"
+#include "fastboot_config.h"
 #include "fastboot_memory_map.h"
 #include "main.h"
 #include "stm32f4xx_hal.h"
 #include <stdbool.h>
+#include <string.h>
 
 #define W25Q_CMD_WRITE_ENABLE 0x06u
 #define W25Q_CMD_READ_DATA    0x03u
@@ -10,6 +12,8 @@
 #define W25Q_CMD_READ_STATUS1 0x05u
 #define W25Q_CMD_PAGE_PROGRAM 0x02u
 #define W25Q_CMD_SECTOR_ERASE 0x20u
+#define W25Q_CMD_BLOCK32_ERASE 0x52u
+#define W25Q_CMD_BLOCK64_ERASE 0xD8u
 
 #define W25Q_STATUS_BUSY      0x01u
 #define W25Q64_JEDEC_MF_ID    0xEFu
@@ -18,10 +22,13 @@
 #define W25Q_ERASE_TIMEOUT_MS 2000u
 #define W25Q_PAGE_SIZE        256u
 #define W25Q_SECTOR_SIZE      4096u
+#define W25Q_BLOCK32_SIZE     0x8000u
+#define W25Q_BLOCK64_SIZE     0x10000u
 
 static SPI_HandleTypeDef s_hspi2;
 static bool s_initialized;
 static uint8_t s_jedec_id[3];
+static w25q_perf_t s_perf;
 
 typedef struct {
     uint32_t base;
@@ -49,11 +56,12 @@ typedef struct {
     size_t pos;
     uint32_t wait_start;
     uint32_t erase_addr;
+    uint32_t erase_size;
 } w25q_async_writer_t;
 
 static w25q_sink_ctx_t s_ota_sink_ctx = {
     FASTBOOT_EXTFLASH_OTA_OFFSET,
-    FASTBOOT_EXTFLASH_OTA_SIZE,
+    FASTBOOT_CFG_STAGING_CAPACITY,
     0u,
     0u,
 };
@@ -194,7 +202,7 @@ fboot_status_t fastboot_w25q64_init(void)
     s_hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
     s_hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
     s_hspi2.Init.NSS = SPI_NSS_SOFT;
-    s_hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+    s_hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
     s_hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
     s_hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
     s_hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -324,14 +332,11 @@ fboot_status_t fastboot_w25q64_write(uint32_t offset,
     return wait_not_busy(W25Q_SPI_TIMEOUT_MS);
 }
 
-fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset)
+static fboot_status_t erase_cmd(uint32_t offset, uint8_t cmd)
 {
-    uint8_t cmd[4];
+    uint8_t buf[4];
     fboot_status_t rc;
 
-    if ((offset % 4096u) != 0u || offset >= FASTBOOT_EXTFLASH_SIZE) {
-        return FB_ERR_RANGE;
-    }
     if (!s_initialized) {
         rc = fastboot_w25q64_init();
         if (rc != FB_OK) {
@@ -347,18 +352,59 @@ fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset)
         return rc;
     }
 
-    cmd[0] = W25Q_CMD_SECTOR_ERASE;
-    cmd[1] = (uint8_t)(offset >> 16);
-    cmd[2] = (uint8_t)(offset >> 8);
-    cmd[3] = (uint8_t)offset;
+    buf[0] = cmd;
+    buf[1] = (uint8_t)(offset >> 16);
+    buf[2] = (uint8_t)(offset >> 8);
+    buf[3] = (uint8_t)offset;
 
     cs_low();
-    rc = spi_tx(cmd, sizeof(cmd));
+    rc = spi_tx(buf, sizeof(buf));
     cs_high();
     if (rc != FB_OK) {
         return rc;
     }
     return wait_not_busy(W25Q_ERASE_TIMEOUT_MS);
+}
+
+uint32_t fastboot_w25q64_best_erase_size(uint32_t offset, uint32_t remaining)
+{
+    if (remaining >= W25Q_BLOCK64_SIZE &&
+        (offset % W25Q_BLOCK64_SIZE) == 0u) {
+        return W25Q_BLOCK64_SIZE;
+    }
+    if (remaining >= W25Q_BLOCK32_SIZE &&
+        (offset % W25Q_BLOCK32_SIZE) == 0u) {
+        return W25Q_BLOCK32_SIZE;
+    }
+    return W25Q_SECTOR_SIZE;
+}
+
+fboot_status_t fastboot_w25q64_erase(uint32_t offset, uint32_t size)
+{
+    uint8_t cmd;
+
+    if ((offset % W25Q_SECTOR_SIZE) != 0u || offset >= FASTBOOT_EXTFLASH_SIZE) {
+        return FB_ERR_RANGE;
+    }
+    switch (size) {
+    case W25Q_BLOCK64_SIZE:
+        cmd = W25Q_CMD_BLOCK64_ERASE;
+        break;
+    case W25Q_BLOCK32_SIZE:
+        cmd = W25Q_CMD_BLOCK32_ERASE;
+        break;
+    case W25Q_SECTOR_SIZE:
+        cmd = W25Q_CMD_SECTOR_ERASE;
+        break;
+    default:
+        return FB_ERR_PARAM;
+    }
+    return erase_cmd(offset, cmd);
+}
+
+fboot_status_t fastboot_w25q64_erase_sector(uint32_t offset)
+{
+    return fastboot_w25q64_erase(offset, W25Q_SECTOR_SIZE);
 }
 
 fboot_status_t fastboot_w25q64_erase_range(uint32_t offset, size_t len)
@@ -396,13 +442,16 @@ static fboot_status_t ota_sink_erase_until(void *ctx, uint32_t end_offset)
     }
     while (sink->erased_until < end_offset) {
         fboot_status_t rc;
-        uint32_t erase_offset = sink->base + sink->erased_until;
+        uint32_t abs_offset = sink->base + sink->erased_until;
+        uint32_t remaining = sink->active_size - sink->erased_until;
+        uint32_t erase_sz = fastboot_w25q64_best_erase_size(abs_offset,
+                                                            remaining);
 
-        rc = fastboot_w25q64_erase_sector(erase_offset);
+        rc = fastboot_w25q64_erase(abs_offset, erase_sz);
         if (rc != FB_OK) {
             return rc;
         }
-        sink->erased_until += W25Q_SECTOR_SIZE;
+        sink->erased_until += erase_sz;
         if (sink->erased_until > sink->active_size) {
             sink->erased_until = sink->active_size;
         }
@@ -484,7 +533,11 @@ static fboot_status_t ota_sink_poll(void *ctx)
             if ((s_ota_writer.offset - sink->base) +
                     (uint32_t)s_ota_writer.len >
                 sink->erased_until) {
-                s_ota_writer.erase_addr = sink->base + sink->erased_until;
+                uint32_t abs = sink->base + sink->erased_until;
+                uint32_t rem = sink->active_size - sink->erased_until;
+                s_ota_writer.erase_addr = abs;
+                s_ota_writer.erase_size =
+                    fastboot_w25q64_best_erase_size(abs, rem);
                 s_ota_writer.state = W25Q_ASYNC_ERASE_WRITE_ENABLE;
             } else {
                 s_ota_writer.state = W25Q_ASYNC_WRITE_ENABLE;
@@ -501,9 +554,22 @@ static fboot_status_t ota_sink_poll(void *ctx)
             break;
 
         case W25Q_ASYNC_ERASE_SECTOR: {
-            uint8_t cmd[4];
+            uint8_t erase_cmd;
 
-            cmd[0] = W25Q_CMD_SECTOR_ERASE;
+            switch (s_ota_writer.erase_size) {
+            case W25Q_BLOCK64_SIZE:
+                erase_cmd = W25Q_CMD_BLOCK64_ERASE;
+                break;
+            case W25Q_BLOCK32_SIZE:
+                erase_cmd = W25Q_CMD_BLOCK32_ERASE;
+                break;
+            default:
+                erase_cmd = W25Q_CMD_SECTOR_ERASE;
+                break;
+            }
+
+            uint8_t cmd[4];
+            cmd[0] = erase_cmd;
             cmd[1] = (uint8_t)(s_ota_writer.erase_addr >> 16);
             cmd[2] = (uint8_t)(s_ota_writer.erase_addr >> 8);
             cmd[3] = (uint8_t)s_ota_writer.erase_addr;
@@ -515,6 +581,7 @@ static fboot_status_t ota_sink_poll(void *ctx)
                 s_ota_writer.state = W25Q_ASYNC_IDLE;
                 return rc;
             }
+            ++s_perf.erase_count;
             s_ota_writer.wait_start = HAL_GetTick();
             s_ota_writer.state = W25Q_ASYNC_WAIT_ERASE_DONE;
             return FB_BUSY;
@@ -524,20 +591,28 @@ static fboot_status_t ota_sink_poll(void *ctx)
             rc = check_not_busy(W25Q_ERASE_TIMEOUT_MS, s_ota_writer.wait_start,
                                 &ready);
             if (rc == FB_BUSY) {
+                ++s_perf.busy_poll_count;
                 return FB_BUSY;
             }
             if (rc != FB_OK) {
                 s_ota_writer.state = W25Q_ASYNC_IDLE;
                 return rc;
             }
-            sink->erased_until += W25Q_SECTOR_SIZE;
+            s_perf.erase_us += (HAL_GetTick() - s_ota_writer.wait_start) * 1000u;
+            sink->erased_until += s_ota_writer.erase_size;
             if (sink->erased_until > sink->active_size) {
                 sink->erased_until = sink->active_size;
             }
+            /* If current write still needs more erases, continue erasing.
+             * Otherwise, go to program. */
             if ((s_ota_writer.offset - sink->base) +
                     (uint32_t)s_ota_writer.len >
                 sink->erased_until) {
-                s_ota_writer.erase_addr = sink->base + sink->erased_until;
+                uint32_t abs = sink->base + sink->erased_until;
+                uint32_t rem = sink->active_size - sink->erased_until;
+                s_ota_writer.erase_addr = abs;
+                s_ota_writer.erase_size =
+                    fastboot_w25q64_best_erase_size(abs, rem);
                 s_ota_writer.state = W25Q_ASYNC_ERASE_WRITE_ENABLE;
             } else {
                 s_ota_writer.state = W25Q_ASYNC_WRITE_ENABLE;
@@ -579,6 +654,7 @@ static fboot_status_t ota_sink_poll(void *ctx)
                 return rc;
             }
             s_ota_writer.pos += chunk;
+            ++s_perf.program_count;
             s_ota_writer.wait_start = HAL_GetTick();
             s_ota_writer.state = W25Q_ASYNC_WAIT_PROGRAM_DONE;
             return FB_BUSY;
@@ -588,12 +664,15 @@ static fboot_status_t ota_sink_poll(void *ctx)
             rc = check_not_busy(W25Q_SPI_TIMEOUT_MS, s_ota_writer.wait_start,
                                 &ready);
             if (rc == FB_BUSY) {
+                ++s_perf.busy_poll_count;
                 return FB_BUSY;
             }
             if (rc != FB_OK) {
                 s_ota_writer.state = W25Q_ASYNC_IDLE;
                 return rc;
             }
+            s_perf.program_us +=
+                (HAL_GetTick() - s_ota_writer.wait_start) * 1000u;
             if (s_ota_writer.pos >= s_ota_writer.len) {
                 s_ota_writer.state = W25Q_ASYNC_IDLE;
                 return FB_OK;
@@ -637,9 +716,9 @@ static fboot_status_t ota_sink_write_start(void *ctx, uint32_t offset,
     return ota_sink_poll(ctx);
 }
 
-const fboot_sink_t *fastboot_w25q64_ota_sink(void)
+const fastboot_writer_t *fastboot_w25q64_staging_writer(void)
 {
-    static const fboot_sink_t sink = {
+    static const fastboot_writer_t writer = {
         ota_sink_begin,
         ota_sink_write,
         ota_sink_write_start,
@@ -648,56 +727,53 @@ const fboot_sink_t *fastboot_w25q64_ota_sink(void)
         &s_ota_sink_ctx,
     };
 
-    return &sink;
+    return &writer;
 }
 
-static fboot_status_t staging_read(void *ctx, uint32_t offset, uint8_t *data,
-                                   size_t len)
+static fboot_status_t w25q_area_read(void *ctx, uint32_t offset, uint8_t *data,
+                                     size_t len)
 {
     (void)ctx;
-    fboot_status_t rc = fastboot_w25q64_init();
-
-    if (rc != FB_OK) {
-        return rc;
-    }
-    return fastboot_w25q64_read(FASTBOOT_EXTFLASH_OTA_OFFSET + offset, data,
-                                len);
+    return fastboot_w25q64_read(offset, data, len);
 }
 
-static fboot_status_t staging_erase_sector(void *ctx, uint32_t offset)
+static fboot_status_t w25q_area_write(void *ctx, uint32_t offset,
+                                      const uint8_t *data, size_t len)
 {
     (void)ctx;
-    return fastboot_w25q64_erase_sector(FASTBOOT_EXTFLASH_OTA_OFFSET + offset);
+    return fastboot_w25q64_write(offset, data, len);
 }
 
-const fastboot_staging_source_t *fastboot_w25q64_staging_source(void)
+static fboot_status_t w25q_area_erase(void *ctx, uint32_t offset,
+                                      uint32_t len)
 {
-    static const fastboot_staging_source_t source = {
-        staging_read,
-        staging_erase_sector,
+    (void)ctx;
+    return fastboot_w25q64_erase_range(offset, len);
+}
+
+const fastboot_flash_area_t *fastboot_w25q64_staging_area(void)
+{
+    static const fastboot_flash_ops_t ops = {
+        w25q_area_read,
+        w25q_area_write,
+        w25q_area_erase,
+    };
+    static const fastboot_flash_area_t area = {
+        FASTBOOT_EXTFLASH_OTA_OFFSET,
+        FASTBOOT_CFG_STAGING_CAPACITY,
+        &ops,
         NULL,
     };
 
-    return &source;
+    return &area;
 }
 
-static fboot_status_t staging_clear(void *ctx)
+void fastboot_w25q64_perf_reset(void)
 {
-    (void)ctx;
-    return fastboot_w25q64_erase_sector(FASTBOOT_EXTFLASH_OTA_OFFSET);
+    memset(&s_perf, 0, sizeof(s_perf));
 }
 
-const fastboot_staging_store_t *fastboot_w25q64_staging_store(void)
+const w25q_perf_t *fastboot_w25q64_perf(void)
 {
-    static fastboot_staging_store_t store;
-    static bool store_init;
-
-    if (!store_init) {
-        store.sink = fastboot_w25q64_ota_sink();
-        store.read = staging_read;
-        store.clear = staging_clear;
-        store.ctx = NULL;
-        store_init = true;
-    }
-    return &store;
+    return &s_perf;
 }

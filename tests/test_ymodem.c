@@ -19,15 +19,23 @@
 static uint32_t s_tick;
 static uint32_t s_watchdog_count;
 
-uint32_t fastboot_port_tick_ms(void)
+static uint32_t runtime_tick_ms(void *ctx)
 {
+    (void)ctx;
     return s_tick++;
 }
 
-void fastboot_port_feed_watchdog(void)
+static void runtime_feed_watchdog(void *ctx)
 {
+    (void)ctx;
     ++s_watchdog_count;
 }
+
+static const fastboot_runtime_t s_runtime = {
+    runtime_tick_ms,
+    runtime_feed_watchdog,
+    NULL,
+};
 
 typedef struct {
     const uint8_t *input;
@@ -172,12 +180,12 @@ static void test_receive_minimal_session(void)
     fake_io_ctx_t io_ctx;
     fake_sink_ctx_t sink_ctx = {0};
     uint32_t out_size = 0u;
-    const fboot_io_t io = {
+    const fastboot_transport_t transport = {
         fake_read,
         fake_write_byte,
         &io_ctx,
     };
-    const fboot_sink_t sink = {
+    const fastboot_writer_t writer = {
         fake_begin,
         fake_write,
         NULL,
@@ -191,7 +199,7 @@ static void test_receive_minimal_session(void)
     io_ctx.input = session;
     io_ctx.input_len = session_len;
 
-    assert(fastboot_ymodem_receive(&io, &sink, &out_size) == FB_OK);
+    assert(fastboot_ymodem_receive(&transport, &writer, &s_runtime, &out_size) == FB_OK);
     assert(out_size == 3u);
     assert(sink_ctx.begin_size == 3u);
     assert(sink_ctx.written == 3u);

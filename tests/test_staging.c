@@ -10,6 +10,18 @@ static uint8_t s_fake_ext[0x10000u];
 static uint8_t s_fake_flash[FAKE_FLASH_SIZE];
 static uint32_t s_ext_clear_count;
 
+static uint32_t runtime_tick_ms(void *ctx)
+{
+    (void)ctx;
+    return 0u;
+}
+
+static const fastboot_runtime_t s_runtime = {
+    runtime_tick_ms,
+    NULL,
+    NULL,
+};
+
 static fboot_status_t ext_read(void *ctx, uint32_t offset, uint8_t *data,
                                size_t len)
 {
@@ -21,77 +33,114 @@ static fboot_status_t ext_read(void *ctx, uint32_t offset, uint8_t *data,
     return FB_OK;
 }
 
-static fboot_status_t ext_clear(void *ctx)
+static fboot_status_t ext_write(void *ctx, uint32_t offset,
+                                const uint8_t *data, size_t len)
 {
     (void)ctx;
-    memset(s_fake_ext, 0xFFu, 4096u);
+    if (offset + len > sizeof(s_fake_ext)) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(&s_fake_ext[offset], data, len);
+    return FB_OK;
+}
+
+static fboot_status_t ext_erase(void *ctx, uint32_t offset, uint32_t len)
+{
+    (void)ctx;
+    if (offset + len > sizeof(s_fake_ext)) {
+        return FB_ERR_RANGE;
+    }
+    memset(&s_fake_ext[offset], 0xFFu, len);
     ++s_ext_clear_count;
     return FB_OK;
 }
 
-static const fastboot_staging_store_t s_store = {
-    NULL,
+static const fastboot_flash_ops_t s_ext_ops = {
     ext_read,
-    ext_clear,
+    ext_write,
+    ext_erase,
+};
+
+static fastboot_flash_area_t s_staging = {
+    0u,
+    sizeof(s_fake_ext),
+    &s_ext_ops,
     NULL,
 };
 
-static fboot_status_t iflash_erase(void *ctx)
-{
-    (void)ctx;
-    memset(s_fake_flash, 0xFFu, sizeof(s_fake_flash));
-    return FB_OK;
-}
-
-static fboot_status_t iflash_write(void *ctx, uint32_t addr,
-                                   const uint8_t *data, size_t len)
-{
-    uint32_t offset;
-
-    (void)ctx;
-    if (addr < FASTBOOT_APP_FLASH_BASE ||
-        addr + len > FASTBOOT_APP_FLASH_BASE + FAKE_FLASH_SIZE) {
-        return FB_ERR_RANGE;
-    }
-    offset = addr - FASTBOOT_APP_FLASH_BASE;
-    memcpy(&s_fake_flash[offset], data, len);
-    return FB_OK;
-}
-
-static fboot_status_t iflash_verify(void *ctx, uint32_t addr,
-                                    const uint8_t *data, size_t len)
-{
-    uint32_t offset;
-
-    (void)ctx;
-    if (addr < FASTBOOT_APP_FLASH_BASE ||
-        addr + len > FASTBOOT_APP_FLASH_BASE + FAKE_FLASH_SIZE) {
-        return FB_ERR_RANGE;
-    }
-    offset = addr - FASTBOOT_APP_FLASH_BASE;
-    return memcmp(&s_fake_flash[offset], data, len) == 0 ? FB_OK : FB_ERR_VERIFY;
-}
-
-static fboot_status_t iflash_read(void *ctx, uint32_t addr, uint8_t *data,
+static fboot_status_t iflash_read(void *ctx, uint32_t offset, uint8_t *data,
                                   size_t len)
 {
-    uint32_t offset;
-
     (void)ctx;
-    if (addr < FASTBOOT_APP_FLASH_BASE ||
-        addr + len > FASTBOOT_APP_FLASH_BASE + FAKE_FLASH_SIZE) {
+    if (offset + len > FAKE_FLASH_SIZE) {
         return FB_ERR_RANGE;
     }
-    offset = addr - FASTBOOT_APP_FLASH_BASE;
     memcpy(data, &s_fake_flash[offset], len);
     return FB_OK;
 }
 
-static const fastboot_iflash_ops_t s_iflash = {
-    iflash_erase,
-    iflash_write,
-    iflash_verify,
+static fboot_status_t iflash_write(void *ctx, uint32_t offset,
+                                   const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    if (offset + len > FAKE_FLASH_SIZE) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(&s_fake_flash[offset], data, len);
+    return FB_OK;
+}
+
+static fboot_status_t iflash_erase(void *ctx, uint32_t offset, uint32_t len)
+{
+    (void)ctx;
+    if (offset + len > FAKE_FLASH_SIZE) {
+        return FB_ERR_RANGE;
+    }
+    memset(&s_fake_flash[offset], 0xFFu, len);
+    return FB_OK;
+}
+
+static const fastboot_flash_ops_t s_iflash_ops = {
     iflash_read,
+    iflash_write,
+    iflash_erase,
+};
+
+static fastboot_flash_area_t s_primary = {
+    0u,
+    FAKE_FLASH_SIZE,
+    &s_iflash_ops,
+    NULL,
+};
+
+static bool vector_is_valid(const uint8_t *vector, size_t len,
+                            uint32_t load_addr, uint32_t image_size, void *ctx)
+{
+    uint32_t sp;
+    uint32_t reset;
+
+    (void)load_addr;
+    (void)image_size;
+    (void)ctx;
+    if (len < 8u) {
+        return false;
+    }
+    memcpy(&sp, vector, 4u);
+    memcpy(&reset, vector + 4u, 4u);
+    if (sp < FASTBOOT_SRAM_BASE || sp > FASTBOOT_SRAM_END) {
+        return false;
+    }
+    if (reset < FASTBOOT_APP_FLASH_BASE ||
+        reset > FASTBOOT_APP_FLASH_END) {
+        return false;
+    }
+    return true;
+}
+
+static fastboot_image_policy_t s_policy = {
+    FASTBOOT_APP_FLASH_BASE,
+    FASTBOOT_APP_FLASH_SIZE,
+    vector_is_valid,
     NULL,
 };
 
@@ -128,7 +177,8 @@ static void test_no_update(void)
     fboot_status_t rc;
 
     memset(s_fake_ext, 0, sizeof(s_fake_ext));
-    rc = fastboot_staging_install_if_pending(&s_store, &s_iflash, NULL);
+    rc = fastboot_staging_install_if_pending(&s_staging, &s_primary,
+                                             &s_policy, &s_runtime, NULL);
     assert(rc == FB_NO_UPDATE);
 }
 
@@ -147,7 +197,8 @@ static void test_valid_install(void)
     memset(s_fake_flash, 0, sizeof(s_fake_flash));
 
     s_ext_clear_count = 0u;
-    rc = fastboot_staging_install_if_pending(&s_store, &s_iflash, NULL);
+    rc = fastboot_staging_install_if_pending(&s_staging, &s_primary,
+                                             &s_policy, &s_runtime, NULL);
     assert(rc == FB_OK);
     assert(s_ext_clear_count == 1u);
     assert(memcmp(s_fake_flash, image, 8u) == 0);
@@ -169,17 +220,39 @@ static fboot_status_t ext_read_offset(void *ctx, uint32_t offset,
     return FB_OK;
 }
 
-static fboot_status_t ext_clear_offset(void *ctx)
+static fboot_status_t ext_write_offset(void *ctx, uint32_t offset,
+                                       const uint8_t *data, size_t len)
 {
     (void)ctx;
-    memset(&s_fake_ext_offset[BASE_OFFSET], 0xFFu, 4096u);
+    uint32_t abs_offset = BASE_OFFSET + offset;
+    if (abs_offset + len > sizeof(s_fake_ext_offset)) {
+        return FB_ERR_RANGE;
+    }
+    memcpy(&s_fake_ext_offset[abs_offset], data, len);
     return FB_OK;
 }
 
-static const fastboot_staging_store_t s_store_offset = {
-    NULL,
+static fboot_status_t ext_erase_offset(void *ctx, uint32_t offset, uint32_t len)
+{
+    (void)ctx;
+    uint32_t abs_offset = BASE_OFFSET + offset;
+    if (abs_offset + len > sizeof(s_fake_ext_offset)) {
+        return FB_ERR_RANGE;
+    }
+    memset(&s_fake_ext_offset[abs_offset], 0xFFu, len);
+    return FB_OK;
+}
+
+static const fastboot_flash_ops_t s_ext_ops_offset = {
     ext_read_offset,
-    ext_clear_offset,
+    ext_write_offset,
+    ext_erase_offset,
+};
+
+static fastboot_flash_area_t s_staging_offset = {
+    0u,
+    sizeof(s_fake_ext_offset) - BASE_OFFSET,
+    &s_ext_ops_offset,
     NULL,
 };
 
@@ -197,7 +270,8 @@ static void test_nonzero_backend_base(void)
     memcpy(&s_fake_ext_offset[BASE_OFFSET], pkg, pkg_len);
     memset(s_fake_flash, 0, sizeof(s_fake_flash));
 
-    rc = fastboot_staging_install_if_pending(&s_store_offset, &s_iflash, NULL);
+    rc = fastboot_staging_install_if_pending(&s_staging_offset, &s_primary,
+                                             &s_policy, &s_runtime, NULL);
     assert(rc == FB_OK);
     assert(memcmp(s_fake_flash, image, 8u) == 0);
 }
@@ -206,10 +280,12 @@ static void test_null_params(void)
 {
     fboot_status_t rc;
 
-    rc = fastboot_staging_install_if_pending(NULL, &s_iflash, NULL);
+    rc = fastboot_staging_install_if_pending(NULL, &s_primary,
+                                             &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_PARAM);
 
-    rc = fastboot_staging_install_if_pending(&s_store, NULL, NULL);
+    rc = fastboot_staging_install_if_pending(&s_staging, NULL,
+                                             &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_PARAM);
 }
 

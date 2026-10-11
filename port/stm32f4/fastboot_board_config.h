@@ -74,7 +74,7 @@
 /* ── 队列和协议参数 ──────────────────────────────────────────────────────── */
 
 /** @brief 数据包队列深度（槽位数量），建议 >= 8 */
-#define FASTBOOT_CFG_QUEUE_DEPTH            16u
+#define FASTBOOT_CFG_QUEUE_DEPTH            32u
 
 /** @brief YMODEM 数据包大小（字节），支持 128 或 1024 */
 #define FASTBOOT_CFG_YMODEM_PACKET_SIZE     1024u

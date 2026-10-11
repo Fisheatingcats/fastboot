@@ -15,7 +15,7 @@
 #include <string.h>
 
 /** @brief DMA 接收环形缓冲区大小（字节） */
-#define UART_RX_DMA_BUF_SIZE 4096u
+#define UART_RX_DMA_BUF_SIZE 8192u
 /** @brief 轮询等待步长（毫秒） */
 #define UART_RX_WAIT_STEP_MS 1u
 

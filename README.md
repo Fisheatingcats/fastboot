@@ -16,6 +16,8 @@ FastBoot 将 YMODEM 固件接收、FWOT 包校验与安装、暂存区管理和�
 - STM32F4 参考端口：UART DMA、片上 Flash、W25Q64 和运行时适配。
 - Host 构建与协议/队列/OTA 单元测试，不依赖 MCU 硬件。
 
+STM32F411CEU6 demo 的 921600 baud 实测基线为 80.4 KiB/s，零重传。该配置使用 32 个 YMODEM 队列槽和 8 KiB UART DMA 环形缓冲；其他板卡应结合 SRAM 和 Flash 特性重新选取。测试条件与数据见 [STM32F4 demo 基线](doc/07-stm32f4-reference.md)。
+
 ## 架构与目录
 
 ```text
@@ -83,6 +85,7 @@ fboot_status_t fastboot_staging_install_if_pending(
 | [OTA 安装](doc/04-ota.md) | FWOT 格式、镜像校验和安装过程 |
 | [Staging 管理](doc/05-staging.md) | 暂存区检查和待安装状态 |
 | [移植与抽象](doc/06-abstraction.md) | 配置、接口实现和新平台接入 |
+| [STM32F4 demo 基线](doc/07-stm32f4-reference.md) | 经实测的队列、串口配置和 OTA 指标 |
 
 ## 配置
 

@@ -9,9 +9,6 @@
 
 #include "fastboot_queue.h"
 
-/** @brief 包头长度（类型 + 序号 + 反码），用于定位载荷起始位置 */
-#define PACKET_HEADER  3u
-
 /**
  * @brief 重置队列到初始状态
  *
@@ -119,7 +116,7 @@ fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
     fboot_queue_slot_t *slot;
     fboot_status_t rc;
 
-    if (!writer) {
+    if (!q || !writer) {
         return FB_ERR_PARAM;
     }
     if (fastboot_queue_empty(q)) {
@@ -130,12 +127,15 @@ fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
 
     if (slot->writing) {
         /* 异步写入进行中，轮询完成状态 */
-        rc = writer->poll ? writer->poll(writer->ctx) : FB_OK;
+        if (!writer->poll) {
+            return FB_ERR_PARAM;
+        }
+        rc = writer->poll(writer->ctx);
 #if FASTBOOT_CFG_ENABLE_ASYNC_SINK
     } else if (writer->write_start && writer->poll && writer->busy) {
         /* 异步写入就绪，启动 write_start */
         rc = writer->write_start(writer->ctx, slot->offset,
-                                 &slot->packet[PACKET_HEADER], slot->len);
+                                 &slot->packet[FASTBOOT_QUEUE_HEADER_SIZE], slot->len);
         if (rc == FB_BUSY || writer->busy(writer->ctx)) {
             slot->writing = true;
             return FB_BUSY;
@@ -143,8 +143,11 @@ fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
 #endif
     } else {
         /* 同步写入 */
+        if (!writer->write) {
+            return FB_ERR_PARAM;
+        }
         rc = writer->write(writer->ctx, slot->offset,
-                           &slot->packet[PACKET_HEADER], slot->len);
+                           &slot->packet[FASTBOOT_QUEUE_HEADER_SIZE], slot->len);
     }
 
     if (rc == FB_BUSY) {

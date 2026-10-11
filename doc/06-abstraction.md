@@ -316,7 +316,7 @@ fastboot_flash_area_read(&primary, 0, buf, 64);   // → stm32_flash_read(0x0801
 ### 7.1 速率不匹配
 
 ```
-UART 接收速率: ~115KB/s (921600 baud)
+UART 921600 baud、8N1 的理论 payload 上限约 92.16 kB/s（90.0 KiB/s）；STM32F411CEU6 参考 demo 实测 80.4 KiB/s。
 Flash 写入速率: ~50KB/s (内部 Flash) 或 ~200KB/s (W25Q64)
 ```
 

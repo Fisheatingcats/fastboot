@@ -32,7 +32,7 @@
 #define ABORT1    0x41u  /**< @brief 'A'，中止传输 */
 #define ABORT2    0x61u  /**< @brief 'a'，中止传输 */
 
-#define PACKET_HEADER   3u     /**< @brief 包头长度：类型(1) + 序号(1) + 反码(1) */
+#define PACKET_HEADER   FASTBOOT_QUEUE_HEADER_SIZE
 #define PACKET_TRAILER  2u     /**< @brief 包尾长度：CRC-16(2) */
 #define PACKET_OVERHEAD (PACKET_HEADER + PACKET_TRAILER)  /**< @brief 包开销总计 */
 #define PACKET_SIZE     128u   /**< @brief SOH 包载荷大小 */

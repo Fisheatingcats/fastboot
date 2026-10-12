@@ -16,7 +16,7 @@
 
 ## 1. 概述
 
-OTA 安装模块（`src/core/fastboot_ota.c`）负责从 staging 区读取 FWOT 包并安装到 primary flash。安装流程包含多重校验：header 校验、向量表验证、流式 CRC-32、可选 readback 验证。
+OTA 安装模块（`src/core/fastboot_ota.c`）负责从 staging 区读取 FWOT 包并安装到 primary flash。安装流程包含多重校验：header 校验、向量表验证、擦除前完整镜像 CRC-32、写入时流式 CRC-32、可选 readback 验证。
 
 **核心函数**：
 ```c
@@ -175,7 +175,15 @@ if (!policy->vector_is_valid(s_chunk, 8u, header.load_addr,
 - 栈指针是否在合法 RAM 范围内
 - 复位向量是否在镜像地址范围内
 
-### 步骤 4：擦除 Primary Flash
+### 步骤 4：校验暂存区完整镜像
+
+按 1024 字节分块读取 `image_offset` 起始的全部 `image_size` 字节，计算 CRC-32 并与包头的 `image_crc32` 比较。每个分块处理后喂看门狗，复用现有静态缓冲区，无需额外镜像 RAM。
+
+CRC 不匹配返回 `FB_ERR_CRC`，读取失败直接返回底层错误；此阶段不会擦除或写入 primary，旧 App 保持完整。成功时输出 `[FB] staging crc ok`，才进入安装。
+
+此检查独立于 `FASTBOOT_CFG_ENABLE_READBACK_VERIFY`，即使关闭安装后回读，也必须通过擦除前校验。代价是增加一次外部 Flash 全镜像读取和 CRC 计算。它保护安装前已损坏的包；安装中断电后的恢复仍需要额外的安装状态或备份机制。
+
+### 步骤 5：擦除 Primary Flash
 
 ```c
 rc = fastboot_flash_area_erase(primary, 0u, primary->size);
@@ -183,12 +191,14 @@ rc = fastboot_flash_area_erase(primary, 0u, primary->size);
 
 擦除 primary flash 全区，为写入做准备。
 
-### 步骤 5：分块写入（流式 CRC-32）
+### 步骤 6：分块写入（流式 CRC-32）
 
 ```c
 #define OTA_CHUNK_SIZE 1024u
 static uint8_t s_chunk[OTA_CHUNK_SIZE];
 
+image_crc = 0u;
+image_pos = 0u;
 remaining = header.image_size;
 while (remaining > 0u) {
     size_t chunk = remaining > OTA_CHUNK_SIZE ? OTA_CHUNK_SIZE : remaining;
@@ -211,7 +221,7 @@ while (remaining > 0u) {
 
 **分块大小**：1024 字节（`OTA_CHUNK_SIZE`），使用静态缓冲区避免栈溢出。
 
-### 步骤 6：流式 CRC 校验
+### 步骤 7：流式 CRC 校验
 
 ```c
 if (image_crc != header.image_crc32) {
@@ -219,9 +229,9 @@ if (image_crc != header.image_crc32) {
 }
 ```
 
-比对流式计算的 CRC-32 与头部记录的 `image_crc32`。
+比对流式计算的 CRC-32 与头部记录的 `image_crc32`，继续检测预校验后到复制期间的暂存数据变化。
 
-### 步骤 7：Readback 验证（可选）
+### 步骤 8：Readback 验证（可选）
 
 ```c
 #if FASTBOOT_CFG_ENABLE_READBACK_VERIFY
@@ -407,6 +417,7 @@ fboot_status_t fastboot_ota_install(...)
 | 读取 header | FB_ERR_FLASH |
 | 校验 header | FB_ERR_PARAM, FB_ERR_FORMAT, FB_ERR_CRC |
 | 向量验证 | FB_ERR_FORMAT |
+| 暂存完整镜像校验（擦除前） | FB_ERR_FLASH, FB_ERR_CRC |
 | 擦除 primary | FB_ERR_FLASH |
 | 写入 primary | FB_ERR_FLASH |
 | 流式 CRC | FB_ERR_CRC |
@@ -449,24 +460,30 @@ fastboot_ota_install(staging, primary, policy, runtime, log)
     ├── 失败 → return FB_ERR_FORMAT
     │
     v
-[4] erase(primary, 0, size)
+[4] 完整读取 staging 镜像 → CRC-32 比较
+    │   └─ 每个分块 feed_watchdog()
+    │
+    ├── 读取失败 / CRC 不等 → return 错误码，保留旧 App
+    │
+    v
+[5] erase(primary, 0, size)
     │
     ├── 失败 → return FB_ERR_FLASH
     │
     v
-[5] 循环分块 (1KB)
+[6] 重置 CRC 和偏移，循环分块 (1KB)
     │   ├─ read(staging, src, chunk)
     │   ├─ fastboot_crc32(chunk) → 累积 image_crc
     │   ├─ write(primary, dst, chunk)
     │   └─ feed_watchdog()
     │
     v
-[6] image_crc == header.image_crc32 ?
+[7] image_crc == header.image_crc32 ?
     │
     ├── 不等 → return FB_ERR_CRC
     │
     v
-[7] [可选] readback 验证
+[8] [可选] readback 验证
     │   ├─ read(primary, ...) → 计算 readback_crc
     │   └─ readback_crc == image_crc32 ?
     │

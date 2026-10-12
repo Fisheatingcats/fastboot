@@ -9,6 +9,18 @@
 static uint8_t s_fake_flash[FAKE_FLASH_SIZE];
 static uint32_t s_erase_count;
 static uint32_t s_write_count;
+static uint32_t s_staging_read_bytes;
+static uint32_t s_read_bytes_at_erase;
+static uint32_t s_watchdog_count;
+static uint32_t s_watchdog_at_erase;
+static uint32_t s_staging_fail_offset = UINT32_MAX;
+static bool s_change_staging_after_erase;
+
+static void runtime_feed_watchdog(void *ctx)
+{
+    (void)ctx;
+    ++s_watchdog_count;
+}
 
 static uint32_t runtime_tick_ms(void *ctx)
 {
@@ -18,7 +30,7 @@ static uint32_t runtime_tick_ms(void *ctx)
 
 static const fastboot_runtime_t s_runtime = {
     runtime_tick_ms,
-    NULL,
+    runtime_feed_watchdog,
     NULL,
 };
 
@@ -52,6 +64,8 @@ static fboot_status_t primary_erase(void *ctx, uint32_t offset, uint32_t len)
         return FB_ERR_RANGE;
     }
     memset(&s_fake_flash[offset], 0xFFu, len);
+    s_read_bytes_at_erase = s_staging_read_bytes;
+    s_watchdog_at_erase = s_watchdog_count;
     ++s_erase_count;
     return FB_OK;
 }
@@ -106,7 +120,14 @@ static fboot_status_t staging_read(void *ctx, uint32_t offset,
     if (offset + len > src->len) {
         return FB_ERR_RANGE;
     }
+    if (offset >= s_staging_fail_offset) {
+        return FB_ERR_FLASH;
+    }
     memcpy(buf, &src->data[offset], len);
+    s_staging_read_bytes += (uint32_t)len;
+    if (s_change_staging_after_erase && s_erase_count > 0u && len > 0u) {
+        buf[len - 1u] ^= 1u;
+    }
     return FB_OK;
 }
 
@@ -253,8 +274,75 @@ static void test_install_bad_crc(void)
     staging.ops = &s_staging_ops;
     staging.ctx = &s_staging_src;
 
+    memset(s_fake_flash, 0xA5u, sizeof(s_fake_flash));
+    s_erase_count = 0u;
+    s_write_count = 0u;
     rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
     assert(rc == FB_ERR_CRC);
+    assert(s_erase_count == 0u);
+    assert(s_write_count == 0u);
+    for (size_t i = 0u; i < sizeof(s_fake_flash); ++i) {
+        assert(s_fake_flash[i] == 0xA5u);
+    }
+}
+
+static void test_install_staging_precheck(void)
+{
+    uint8_t image[2053];
+    uint8_t pkg[sizeof(fastboot_ota_header_t) + sizeof(image)];
+    fastboot_flash_area_t staging;
+    fboot_status_t rc;
+
+    memset(image, 0x5Au, sizeof(image));
+    build_valid_vector(image);
+    s_staging_src.data = pkg;
+    s_staging_src.len = build_fwot(pkg, image, sizeof(image));
+    staging.offset = 0u;
+    staging.size = (uint32_t)s_staging_src.len;
+    staging.ops = &s_staging_ops;
+    staging.ctx = &s_staging_src;
+
+    /* A damaged final chunk must leave every byte of the old app intact. */
+    pkg[sizeof(pkg) - 1u] ^= 1u;
+    memset(s_fake_flash, 0xA5u, sizeof(s_fake_flash));
+    s_erase_count = 0u;
+    s_write_count = 0u;
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
+    assert(rc == FB_ERR_CRC);
+    assert(s_erase_count == 0u && s_write_count == 0u);
+    for (size_t i = 0u; i < sizeof(s_fake_flash); ++i) {
+        assert(s_fake_flash[i] == 0xA5u);
+    }
+    pkg[sizeof(pkg) - 1u] ^= 1u;
+
+    /* A later staging read failure also precedes any primary mutation. */
+    s_staging_fail_offset = sizeof(fastboot_ota_header_t) + 1024u;
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
+    assert(rc == FB_ERR_FLASH);
+    assert(s_erase_count == 0u && s_write_count == 0u);
+    for (size_t i = 0u; i < sizeof(s_fake_flash); ++i) {
+        assert(s_fake_flash[i] == 0xA5u);
+    }
+    s_staging_fail_offset = UINT32_MAX;
+
+    /* Valid data is read in full, with watchdog feeds, before erase. */
+    s_staging_read_bytes = 0u;
+    s_watchdog_count = 0u;
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
+    assert(rc == FB_OK);
+    assert(s_read_bytes_at_erase == sizeof(fastboot_ota_header_t) + 8u + sizeof(image));
+    assert(s_watchdog_at_erase == 3u);
+    assert(s_erase_count == 1u && s_write_count == 3u);
+    assert(memcmp(s_fake_flash, image, sizeof(image)) == 0);
+
+    /* Keep the stream check for staging changes between verify and copy. */
+    s_erase_count = 0u;
+    s_write_count = 0u;
+    s_change_staging_after_erase = true;
+    rc = fastboot_ota_install(&staging, &s_primary, &s_policy, &s_runtime, NULL);
+    assert(rc == FB_ERR_CRC);
+    assert(s_erase_count == 1u && s_write_count == 3u);
+    s_change_staging_after_erase = false;
 }
 
 static void test_install_valid_small(void)
@@ -341,6 +429,7 @@ int main(void)
     test_install_null_params();
     test_install_invalid_magic();
     test_install_bad_crc();
+    test_install_staging_precheck();
     test_install_valid_small();
     test_install_invalid_vector();
     test_install_readback_corruption();

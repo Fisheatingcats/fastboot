@@ -3,7 +3,7 @@
  * @brief OTA 固件安装实现
  *
  * 本模块实现从 staging 区读取 FWOT 包并安装到 primary flash 的完整流程：
- * 读取头部 → 校验 magic/version/size/CRC → 向量验证 → 擦除目标区 →
+ * 读取头部 → 校验 magic/version/size/CRC → 向量验证 → 暂存镜像 CRC → 擦除目标区 →
  * 分块写入（流式 CRC-32）→ 可选 readback CRC 验证。
  */
 
@@ -128,10 +128,11 @@ static fboot_status_t validate_header(
  * 1. 从 staging 区偏移 0 读取 OTA 头部
  * 2. 校验头部（magic、version、size、CRC）
  * 3. 读取镜像前 8 字节进行向量合法性验证
- * 4. 擦除 primary flash 全区
- * 5. 以 OTA_CHUNK_SIZE 为单位分块：从 staging 读 → 流式 CRC-32 → 写入 primary
- * 6. 流式 CRC 与头部 image_crc32 比对
- * 7. （可选）readback 验证：从 primary 重新读取并计算 CRC
+ * 4. 完整读取 staging 镜像并校验 CRC-32，失败时保留 primary
+ * 5. 擦除 primary flash 全区
+ * 6. 以 OTA_CHUNK_SIZE 为单位分块：从 staging 读 → 流式 CRC-32 → 写入 primary
+ * 7. 流式 CRC 与头部 image_crc32 比对
+ * 8. （可选）readback 验证：从 primary 重新读取并计算 CRC
  *
  * @note  每个分块写入后会喂看门狗；每隔 OTA_PROGRESS_STEP 输出进度日志。
  * @note  当 FASTBOOT_CFG_ENABLE_FWOT 为 0 时，函数直接返回 FB_ERR_FORMAT。
@@ -182,6 +183,30 @@ fboot_status_t fastboot_ota_install(const fastboot_flash_area_t *staging,
     }
 
     fboot_log_dec32(log, "install image bytes", header.image_size);
+    /* Verify the entire staged image before touching the installed app. */
+    fboot_log_puts(log, "[FB] staging verify");
+    remaining = header.image_size;
+    while (remaining > 0u) {
+        size_t chunk = remaining > OTA_CHUNK_SIZE ? OTA_CHUNK_SIZE : remaining;
+
+        rc = fastboot_flash_area_read(staging, header.image_offset + image_pos,
+                                      s_chunk, chunk);
+        if (rc != FB_OK) {
+            return rc;
+        }
+        image_crc = fastboot_crc32(s_chunk, chunk, image_crc);
+        image_pos += (uint32_t)chunk;
+        remaining -= (uint32_t)chunk;
+        fastboot_runtime_feed_watchdog(runtime);
+    }
+    if (image_crc != header.image_crc32) {
+        fboot_log_puts(log, "[FB] staging CRC MISMATCH");
+        return FB_ERR_CRC;
+    }
+    fboot_log_puts(log, "[FB] staging crc ok");
+
+    image_crc = 0u;
+    image_pos = 0u;
     fboot_log_puts(log, "[FB] erase app flash");
     rc = fastboot_flash_area_erase(primary, 0u, primary->size);
     if (rc != FB_OK) {

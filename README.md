@@ -9,7 +9,7 @@ FastBoot 将 YMODEM 固件接收、FWOT 包校验与安装、暂存区管理和�
 ## 功能
 
 - YMODEM-1K 接收，包含 CRC-16、序号检查、ACK/NAK 和错误恢复。
-- FWOT 包解析、镜像策略校验、流式 CRC32 和安装后回读校验。
+- FWOT 包解析、镜像策略校验、擦除前完整镜像 CRC32、写入时流式 CRC32 和安装后回读校验。
 - Staging 到主 Flash 的安装流程；无更新时返回 `FB_NO_UPDATE`。
 - 固定内存的环形队列，让串口接收和 Flash 写入可以协作运行，不依赖堆分配或 RTOS。
 - `FASTBOOT_CFG_*` 编译配置，可按目标裁剪功能。
@@ -73,7 +73,7 @@ fboot_status_t fastboot_staging_install_if_pending(
     const fboot_log_t *log);
 ```
 
-调用方负责提供 staging/primary Flash 区域和镜像校验策略。`fastboot_ota_install()` 校验包头与镜像、验证向量表、安装镜像，并按配置回读验证结果。完整参数说明见 [OTA 安装流程](doc/04-ota.md) 与 [Staging 流程](doc/05-staging.md)。
+调用方负责提供 staging/primary Flash 区域和镜像校验策略。`fastboot_ota_install()` 校验包头、向量表和暂存区完整镜像 CRC32，通过后才擦除并安装镜像，保留写入时流式 CRC 和按配置启用的回读校验。暂存镜像校验或读取失败时不会擦写旧 App。完整参数说明见 [OTA 安装流程](doc/04-ota.md) 与 [Staging 流程](doc/05-staging.md)。
 
 ## 文档导航
 

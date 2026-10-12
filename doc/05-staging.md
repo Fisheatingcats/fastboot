@@ -15,7 +15,7 @@
 
 ## 1. 概述
 
-Staging 区管理模块（`src/core/fastboot_staging.c`）提供开机时自动检测 staging 区是否存在待安装固件的功能。若检测到有效的 FWOT 包（通过 magic 标识），则调用 OTA 安装流程将固件安装到 primary 区。
+Staging 区管理模块（`src/core/fastboot_staging.c`）提供开机时自动检测 staging 区是否存在待安装固件的功能。检测到 FWOT magic 时，调用 OTA 安装流程进行完整校验并安装到 primary 区；magic 本身不证明接收已完成或镜像有效。
 
 **核心函数**：
 ```c
@@ -129,7 +129,7 @@ Staging 模块是 OTA 模块的"门卫"：只有检测到有效 magic 才会触�
 (void)fastboot_flash_area_erase(staging, 0u, 1u);
 ```
 
-擦除 staging 区的**第 1 个扇区**（`len=1` 表示 1 个扇区），破坏 magic 字段，防止下次开机重复安装。
+`len=1` 的单位是**字节**，表示请求擦除起始 1 字节。W25Q64 端口将请求扩展为所在的 4 KiB 扇区，清理成功后破坏 magic，避免下次启动重复安装。其他端口应明确自己的擦除粒度。
 
 ### 5.2 为什么只擦除第一个扇区
 
@@ -146,7 +146,7 @@ Staging 模块是 OTA 模块的"门卫"：只有检测到有效 magic 才会触�
 erase(staging, 0, 1)    ← 破坏 magic
     │
     v
-return FB_OK             ← 下次开机不会重复安装
+return FB_OK             ← 清理成功时下次开机不会重复安装
 ```
 
 **注意**：安装失败时不清除 staging 区，下次开机会重试安装。
@@ -157,7 +157,7 @@ return FB_OK             ← 下次开机不会重复安装
 (void)fastboot_flash_area_erase(staging, 0u, 1u);
 ```
 
-清除操作的返回值被显式忽略（`(void)` 转换）。即使清除失败，安装已经成功完成，不应影响启动流程。
+清除操作的返回值被显式忽略（`(void)` 转换）。因此 `FB_OK` 只说明安装成功，不保证 magic 已清除；清理失败可能导致下次启动重复安装。产品需要明确清理失败的处理和持久安装状态，详见 [架构教程](08-software-architecture-tutorial.md#11-理解-staging-的职责与边界)。
 
 ## 6. 编译时开关
 
@@ -228,8 +228,16 @@ int main(void)
         log("OTA install failed");
     }
 
-    // 4. 跳转到应用
-    jump_to_app(APP_FLASH_ADDR);
+    // 4. 本例为装配示意；下面的启动/恢复策略由目标工程实现
+    if (rc < FB_OK) {
+        boot_enter_recovery();
+        return 0;
+    }
+    if (boot_app_is_valid(APP_FLASH_ADDR)) {
+        jump_to_app(APP_FLASH_ADDR);
+    }
+    boot_enter_recovery();
+    return 0;
 }
 ```
 
@@ -237,8 +245,13 @@ int main(void)
 
 ```c
 // 场景：先通过 YMODEM 接收固件到 staging，再安装
-fastboot_ymodem_receive(&transport, &staging_writer, &runtime, &size);
-fastboot_staging_install_if_pending(&staging, &primary, &policy, &runtime, &log);
+fboot_status_t rc = fastboot_ymodem_receive(
+    &transport, &staging_writer, &runtime, &size);
+if (rc == FB_OK) {
+    rc = fastboot_staging_install_if_pending(
+        &staging, &primary, &policy, &runtime, &log);
+}
+// 继续依据 rc 决定复位、启动或失败恢复
 ```
 
 ## 8. 流程总览

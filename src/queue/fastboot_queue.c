@@ -161,7 +161,7 @@ fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
         return FB_BUSY;
     }
 
-    /* 更新已写字节数（取较大值，防止回绕） */
+    /* 更新已完成写入的最高结束偏移。 */
     if (written && *written < slot->offset + slot->len) {
         *written = slot->offset + slot->len;
     }

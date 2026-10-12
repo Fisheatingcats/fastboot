@@ -24,7 +24,8 @@ typedef struct {
      *  @param[out] buf        读取缓冲区
      *  @param[in]  len        期望读取字节数
      *  @param[in]  timeout_ms 超时时间（毫秒），0 表示不等待
-     *  @return 实际读取的字节数，超时返回 0 */
+     *  @return 实际读取的字节数，不得超过 len；允许短读，无数据时返回 0
+     *  @note YMODEM 使用 timeout_ms=0 的非阻塞读取，在等待间隙推进 writer。 */
     size_t (*read)(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms);
     /** @brief 向传输介质写入单个字节（阻塞）
      *  @param[in] ctx  平台上下文指针

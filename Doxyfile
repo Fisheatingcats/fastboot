@@ -1,0 +1,31 @@
+# Run from the repository root: doxygen Doxyfile
+PROJECT_NAME           = FastBoot
+PROJECT_BRIEF          = "可移植的嵌入式 OTA Bootloader 核心库"
+OUTPUT_DIRECTORY       = build-docs
+OUTPUT_LANGUAGE        = Chinese
+INPUT_ENCODING         = UTF-8
+INPUT                  = README.md include src port doc
+FILE_PATTERNS          = *.h *.c *.md
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE  = README.md
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = NO
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+FULL_PATH_NAMES        = NO
+OPTIMIZE_OUTPUT_FOR_C  = YES
+ENABLE_PREPROCESSING   = YES
+SEARCH_INCLUDES        = NO
+PREDEFINED             = FASTBOOT_CFG_ENABLE_YMODEM=1 \
+                         FASTBOOT_CFG_ENABLE_FWOT=1 \
+                         FASTBOOT_CFG_ENABLE_STAGING=1 \
+                         FASTBOOT_CFG_ENABLE_ASYNC_SINK=1 \
+                         FASTBOOT_CFG_ENABLE_READBACK_VERIFY=1 \
+                         FASTBOOT_CFG_ENABLE_LOG=1 \
+                         FASTBOOT_CFG_ENABLE_WATCHDOG=1

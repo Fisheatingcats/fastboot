@@ -43,6 +43,7 @@ typedef struct {
  * @brief 环形数据包队列
  *
  * 使用 head/tail/count 管理的固定深度环形队列。
+ * @note 无锁、无并发保护；基本查询和 alloc/commit 接口要求 q 非 NULL。
  */
 typedef struct {
     fboot_queue_slot_t slots[FASTBOOT_QUEUE_DEPTH]; /**< @brief 槽位数组 */
@@ -114,11 +115,13 @@ void fastboot_queue_commit(fboot_queue_t *q);
  *
  * @param[in,out] q       队列指针
  * @param[in]     writer  写入器实例
- * @param[in]     runtime 运行时服务实例（用于喂狗和超时）
- * @param[out]    written 本次写入的字节数（可为 NULL）
+ * @param[in]     runtime 可选运行时服务实例（用于喂狗）
+ * @param[in,out] written 已完成写入的最高结束偏移，可为 NULL
  * @retval FB_OK    写入完成并已释放槽位
  * @retval FB_BUSY  异步写入进行中，需继续调用
- * @retval FB_ERR_* 写入失败
+ * @retval FB_NO_UPDATE 队列为空
+ * @return 其他错误由 writer 传播，接口缺失返回 FB_ERR_PARAM。
+ * @note 输入数据位于槽位 packet 的包头之后；异步完成前不会释放槽位。
  */
 fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
                                         const fastboot_writer_t *writer,
@@ -132,10 +135,11 @@ fboot_status_t fastboot_queue_drain_one(fboot_queue_t *q,
  *
  * @param[in,out] q       队列指针
  * @param[in]     writer  写入器实例
- * @param[in]     runtime 运行时服务实例（用于喂狗和超时）
- * @param[out]    written 累计写入的字节数（可为 NULL）
+ * @param[in]     runtime 可选运行时服务实例（用于喂狗）
+ * @param[in,out] written 已完成写入的最高结束偏移，可为 NULL
  * @retval FB_OK    全部写入完成
- * @retval FB_ERR_* 写入过程中出错
+ * @return 其他错误由 writer 传播。
+ * @note q 必须非 NULL；此函数没有统一超时，writer 的 poll 必须能完成或返回错误。
  */
 fboot_status_t fastboot_queue_drain_all(fboot_queue_t *q,
                                         const fastboot_writer_t *writer,

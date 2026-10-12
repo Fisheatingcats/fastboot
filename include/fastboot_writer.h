@@ -37,9 +37,10 @@ typedef struct {
     /** @brief 异步启动写入（非阻塞，立即返回）
      *  @param[in] ctx    平台上下文指针
      *  @param[in] offset 写入起始偏移
-     *  @param[in] data   写入数据缓冲区（调用方需在 busy 返回 false 前保持有效）
+     *  @param[in] data   写入缓冲区，须保持有效且不修改直至操作成功完成或终止
      *  @param[in] len    写入字节数
-     *  @return FB_OK 启动成功，其他为错误码 */
+     *  @return FB_OK 已完成或已启动；FB_BUSY 操作待推进；负值为错误
+     *  @note 队列根据返回值和 busy 判断是否进入 poll；驱动必须保持两者一致。 */
     fboot_status_t (*write_start)(void *ctx, uint32_t offset,
                                   const uint8_t *data, size_t len);
     /** @brief 轮询异步写入状态，驱动写入进度

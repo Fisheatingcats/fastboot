@@ -40,7 +40,7 @@ typedef struct {
     uint32_t load_addr;       /**< @brief 镜像加载地址 */
     uint32_t image_version;   /**< @brief 镜像版本号 */
     uint32_t reserved[7];     /**< @brief 保留字段 */
-    uint32_t header_crc32;    /**< @brief 包头（不含此字段本身）的 CRC32 校验值 */
+    uint32_t header_crc32;    /**< @brief 整个包头将本字段置零后的 CRC32 校验值 */
 } fastboot_ota_header_t;
 #pragma pack(pop)
 
@@ -78,17 +78,23 @@ typedef struct {
 /**
  * @brief 从 staging 区安装固件到 primary 区
  *
- * 校验 FWOT 包头合法性、镜像 CRC32、向量表后，将镜像从 staging 区拷贝到 primary 区。
+ * 校验 FWOT 包头、向量表和暂存区完整镜像 CRC32 后，才擦除并写入 primary。
+ * 写入时继续计算流式 CRC32，并按配置进行安装后回读校验。
  * 安装过程中会周期性喂看门狗和输出日志。
  *
  * @param[in] staging  staging Flash 区域描述
  * @param[in] primary  primary Flash 区域描述
  * @param[in] policy   镜像安装策略
  * @param[in] runtime  运行时服务实例
- * @param[in] log      日志输出实例
+ * @param[in] log      日志输出实例，可为 NULL
  * @retval FB_OK        安装成功
- * @retval FB_NO_UPDATE staging 区无有效固件包
- * @retval FB_ERR_*     校验或写入失败
+ * @retval FB_ERR_PARAM 必需接口或策略回调无效
+ * @retval FB_ERR_FORMAT 包格式、地址、大小或向量无效，或 FWOT 功能禁用
+ * @retval FB_ERR_CRC   包头、暂存镜像或写入时流式 CRC 不匹配
+ * @retval FB_ERR_VERIFY 安装后回读 CRC 不匹配
+ * @return 其他错误由 Flash 读写或擦除接口传播。
+ * @note 暂存镜像预校验失败时不会擦写 primary；安装中断电恢复不由此 API 保证。
+ * @note 使用静态分块缓冲区，不可并发或重入调用。
  */
 fboot_status_t fastboot_ota_install(const fastboot_flash_area_t *staging,
                                     const fastboot_flash_area_t *primary,
@@ -101,9 +107,9 @@ fboot_status_t fastboot_ota_install(const fastboot_flash_area_t *staging,
  *
  * 使用标准 CRC32（0x04C11DB7 多项式）计算数据的校验值。
  *
- * @param[in] data  数据缓冲区
+ * @param[in] data  数据缓冲区，len 大于 0 时必须有效
  * @param[in] len   数据长度（字节）
- * @param[in] seed  初始值（续算时传入上次结果，首次传 0xFFFFFFFF）
+ * @param[in] seed  累积种子，首次传 0，续算传入上次返回的 CRC32
  * @return CRC32 校验值
  */
 uint32_t fastboot_crc32(const uint8_t *data, size_t len, uint32_t seed);

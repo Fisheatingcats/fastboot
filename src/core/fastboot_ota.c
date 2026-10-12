@@ -23,7 +23,7 @@ static uint8_t s_chunk[OTA_CHUNK_SIZE];
  * @brief 计算 CRC-32（逐字节，多项式 0xEDB88320）
  *
  * 使用标准 CRC-32 算法，初始值和最终异或均为 0xFFFFFFFF。
- * 逐字节处理，内部按位移位查表。
+ * 逐字节处理，内部按位移位与异或。
  *
  * @param data   待计算数据指针
  * @param len    数据长度（字节）

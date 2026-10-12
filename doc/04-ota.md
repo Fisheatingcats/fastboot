@@ -64,7 +64,7 @@ typedef struct {
     uint32_t load_addr;       // 镜像加载地址
     uint32_t image_version;   // 镜像版本号
     uint32_t reserved[7];     // 保留字段（28 字节）
-    uint32_t header_crc32;    // 头部 CRC-32（不含此字段）
+    uint32_t header_crc32;    // 整个头部将本字段置零后的 CRC-32
 } fastboot_ota_header_t;
 #pragma pack(pop)
 ```

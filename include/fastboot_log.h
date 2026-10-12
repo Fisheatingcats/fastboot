@@ -19,9 +19,18 @@
  * 使用者需提供 puts 和 dec32 两个回调以及可选的上下文指针。
  */
 typedef struct {
-    /** @brief 输出字符串回调 */
+    /**
+     * @brief 输出字符串回调。
+     * @param[in] ctx 用户上下文。
+     * @param[in] s 以 NUL 结束的字符串。
+     */
     void (*puts)(void *ctx, const char *s);
-    /** @brief 输出标签+十进制数值回调（如 "size: 1024"） */
+    /**
+     * @brief 输出标签与十进制数值。
+     * @param[in] ctx 用户上下文。
+     * @param[in] label 日志标签。
+     * @param[in] value 待输出的数值。
+     */
     void (*dec32)(void *ctx, const char *label, uint32_t value);
     /** @brief 用户上下文指针，透传给回调函数 */
     void *ctx;

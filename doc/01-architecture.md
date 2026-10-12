@@ -1,5 +1,7 @@
 # FastBoot 整体架构
 
+需要逐步讲解与移植示例时，先阅读 [软件架构完整教程](08-software-architecture-tutorial.md)。本文保留模块速查与概览。
+
 ## 目录
 
 1. [设计目标](#1-设计目标)
@@ -23,29 +25,16 @@ FastBoot 是一个面向 STM32 等嵌入式平台的轻量级 OTA 引导库，�
 
 ## 2. 分层架构
 
+```mermaid
+flowchart TD
+    Board[板级 Bootloader 装配层] --> Core[core / queue]
+    Board --> Port[STM32F4 参考端口]
+    Core --> Interfaces[FastBoot 接口：transport / writer / flash_area / runtime / fboot_log]
+    Port --> Interfaces
+    Port --> HAL[STM32 HAL / 寄存器 / 硬件]
 ```
-+-------------------------------------------------------------+
-|                     应用层 (bootloader)                       |
-|  调用 fastboot_ymodem_receive() / fastboot_staging_install() |
-+-------------------------------------------------------------+
-         |                    |                    |
-         v                    v                    v
-+----------------+  +------------------+  +------------------+
-|   core 层      |  |   queue 层       |  |   port 层        |
-|                |  |                  |  |                  |
-| fastboot_ota   |  | fastboot_queue   |  | stm32f4/         |
-| fastboot_ymodem|  | (环形缓冲区)      |  | uart, flash,     |
-| fastboot_staging|  |                  |  | w25q64, tick     |
-+----------------+  +------------------+  +------------------+
-         |                    |                    |
-         v                    v                    v
-+-------------------------------------------------------------+
-|                  硬件抽象层 (HAL 接口)                        |
-|  fastboot_transport_t  |  fastboot_writer_t                 |
-|  fastboot_flash_area_t |  fastboot_runtime_t                |
-|  fastboot_log_t                                         |
-+-------------------------------------------------------------+
-```
+
+箭头表示源代码依赖。运行时 core/queue 通过接口函数指针调用 port；装配层提供对象并调用 `fastboot_ymodem_receive()`、`fastboot_staging_install_if_pending()`。FastBoot 接口与 STM32 HAL 属于不同层次。
 
 **分层职责**：
 
@@ -136,14 +125,13 @@ runtime (tick/wdt) ←── 超时检测、喂狗保活 ←──────�
     |                              |── receive_packet()
     |                              |   ├─ 校验序号反码
     |                              |   └─ 校验 CRC-16
+    |                              |── fastboot_queue_commit() → 提交已接收槽位
     |         ACK                  |
     | ←──────────────────────────  |
-    |                              |── queue_alloc() → 填充 slot
-    |                              |── queue_commit() → 推进 tail
     |                              |
     |                              |── service_writer() [I/O 等待间隙]
     |                              |   └─ queue_drain_one()
-    |                              |       └─ writer->write() → Flash
+    |                              |       └─ writer->write() 或 write_start/poll → Flash
 ```
 
 ### 4.2 OTA 安装数据流
@@ -155,8 +143,11 @@ staging Flash                  primary Flash
     |── validate_header()          |
     |  读取 image 前 8B            |
     |── vector_is_valid()          |
+    |  完整读取暂存镜像并计算 CRC32 |
+    |── CRC 通过才继续             |
     |                              |
-    |  分块读取 (1KB)              |  擦除全区
+    |                              |  擦除全区
+    |  分块读取 (1KB)              |
     |── fastboot_crc32() ─────────→|── fastboot_flash_area_write()
     |  ...循环...                  |
     |                              |

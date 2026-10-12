@@ -77,8 +77,11 @@ fboot_status_t fastboot_staging_install_if_pending(
 
 ## 文档导航
 
+首次阅读建议从 [软件架构完整教程](doc/08-software-architecture-tutorial.md) 开始，沿一次固件更新理解分层、接口、队列与异步写入，再查阅各模块细节。
+
 | 文档 | 内容 |
 | --- | --- |
+| [软件架构完整教程](doc/08-software-architecture-tutorial.md) | 分层原理、更新数据流、接口契约、移植步骤与故障定位 |
 | [架构概览](doc/01-architecture.md) | 模块边界、依赖关系和调用流程 |
 | [YMODEM 接收](doc/02-ymodem.md) | 协议状态机、传输接口和错误处理 |
 | [异步队列](doc/03-queue.md) | 固定容量队列与协作式写入 |
@@ -86,6 +89,8 @@ fboot_status_t fastboot_staging_install_if_pending(
 | [Staging 管理](doc/05-staging.md) | 暂存区检查和待安装状态 |
 | [移植与抽象](doc/06-abstraction.md) | 配置、接口实现和新平台接入 |
 | [STM32F4 demo 基线](doc/07-stm32f4-reference.md) | 经实测的队列、串口配置和 OTA 指标 |
+
+库代码的接口与函数采用 Doxygen 文档注释。已安装 Doxygen 时，可在仓库根目录运行 `doxygen Doxyfile`，生成 `build-docs/html/index.html`；注释写法与生成配置见教程第 17 节。
 
 ## 配置
 

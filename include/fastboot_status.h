@@ -3,7 +3,8 @@
  * @brief FastBoot 状态码定义
  *
  * 定义了 FastBoot 库统一使用的状态码枚举类型。
- * 所有公共 API 均返回 fboot_status_t 类型，正值表示成功/信息，负值表示错误。
+ * 可失败操作通常返回 fboot_status_t；查询和轻量包装函数也可能返回指针、布尔值或 void。
+ * 非负值表示成功或控制状态，负值表示错误。
  */
 
 #ifndef FASTBOOT_STATUS_H

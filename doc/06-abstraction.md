@@ -79,7 +79,7 @@ static inline void fastboot_runtime_feed_watchdog(
 ### 2.3 设计要点
 
 - `tick_ms` 用于超时检测（YMODEM 接收超时、会话轮询超时）
-- `feed_watchdog` 在长时间操作中保活（Flash 擦除、OTA 安装）
+- `feed_watchdog` 在协议和安装分块等调用点保活；当前 STM32 参考回调为空，产品需实现真实刷新，并检查同步擦除期间的最长喂狗间隔
 - 看门狗可通过 `FASTBOOT_CFG_ENABLE_WATCHDOG=0` 编译时禁用
 - 安全包装函数处理 NULL 指针，避免 core 层空指针检查
 

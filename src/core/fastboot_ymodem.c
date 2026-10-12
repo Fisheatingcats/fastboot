@@ -351,6 +351,7 @@ static int receive_packet(const fastboot_transport_t *transport,
  * - I/O 等待间隙：调用 service_writer() 隐式排水
  *
  * @note  当 FASTBOOT_CFG_ENABLE_YMODEM 为 0 时，直接返回 FB_ERR_PARAM。
+ * @note  使用静态会话状态，不支持并发或重入；成功只代表接收和暂存写入完成。
  *
  * @param transport  传输接口（read、write_byte）
  * @param writer     写入接口（begin、write）

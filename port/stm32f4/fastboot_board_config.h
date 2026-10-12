@@ -3,7 +3,7 @@
  * @brief STM32F411CEU6 板级配置与内存布局
  *
  * 定义 FastBoot 库所需的全部编译时配置宏及内存地址映射。
- * 移植到新平台时，修改此文件即可。
+ * 移植时需同时提供平台回调、内存布局、HAL 依赖和板级启动流程。
  */
 
 #ifndef FASTBOOT_BOARD_CONFIG_H
